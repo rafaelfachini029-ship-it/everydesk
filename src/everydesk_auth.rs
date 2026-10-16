@@ -43,8 +43,13 @@ pub fn punch_envelope(server_key: &str, target_id: &str) -> String {
 
 fn envelope_with(server_key: &str, my_id: &str, target_id: &str, ts: i64, sk: &[u8]) -> String {
     let msg = format!("{SIGN_CONTEXT}|{my_id}|{target_id}|{ts}");
+    signed_envelope(server_key, my_id, ts, &msg, sk)
+}
+
+/// `<server_key>;v1;<my_id>;<ts>;<base64 sig of msg>`; just the server key when the
+/// local key pair is unusable (hbbs will deny and log it; nothing better to send).
+fn signed_envelope(server_key: &str, my_id: &str, ts: i64, msg: &str, sk: &[u8]) -> String {
     let Some(sig) = sign_detached(sk, msg.as_bytes()) else {
-        // hbbs will deny this and log it; there is nothing better to send.
         log::error!("everydesk auth: invalid local key pair, sending no envelope");
         return server_key.to_owned();
     };
@@ -54,7 +59,8 @@ fn envelope_with(server_key: &str, my_id: &str, target_id: &str, ts: i64, sk: &[
 const ONLINE_CONTEXT: &str = "ed-online-v1";
 
 /// The `id` of an `OnlineRequest` (presence query): the same envelope, signed over
-/// `ed-online-v1|<my_id>|<ts>`. hbbs answers at most one per 5 s per id and per IP.
+/// `ed-online-v1|<my_id>|<ts>`. hbbs answers at most one per 5 s per id (and 10 per
+/// 5 s per IP).
 pub fn online_envelope(server_key: &str) -> String {
     let my_id = Config::get_id();
     let (sk, _) = Config::get_key_pair();
@@ -63,11 +69,7 @@ pub fn online_envelope(server_key: &str) -> String {
 
 fn online_envelope_with(server_key: &str, my_id: &str, ts: i64, sk: &[u8]) -> String {
     let msg = format!("{ONLINE_CONTEXT}|{my_id}|{ts}");
-    let Some(sig) = sign_detached(sk, msg.as_bytes()) else {
-        log::error!("everydesk auth: invalid local key pair, sending no envelope");
-        return server_key.to_owned();
-    };
-    format!("{server_key};v1;{my_id};{ts};{}", STANDARD.encode(sig))
+    signed_envelope(server_key, my_id, ts, &msg, sk)
 }
 
 /// `(id, online)` for each of `ids` from hbbs' bitmap (one bit per id, left to
