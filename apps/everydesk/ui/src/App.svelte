@@ -1,11 +1,15 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
   import { onMount } from 'svelte'
+  import RemoteCanvas from './lib/RemoteCanvas.svelte'
+  import type { MsgBox } from './lib/session'
 
   let myId = $state('...')
   let status = $state('...')
   let peerId = $state('')
   let password = $state('')
+  let remote = $state<{ peerId: string; password: string } | null>(null)
+  let lastError = $state('')
 
   async function refresh() {
     try {
@@ -24,18 +28,37 @@
 
   function connect(e: SubmitEvent) {
     e.preventDefault()
-    // Etapa 1: ainda sem efeito.
+    const id = peerId.trim()
+    if (!id) return
+    lastError = ''
+    remote = { peerId: id, password }
+  }
+
+  function onclosed(last: MsgBox | null) {
+    remote = null
+    if (last && last.kind.includes('error')) lastError = `${last.title}: ${last.text}`
   }
 </script>
 
-<main>
-  <p>Seu ID</p>
-  <h1 id="my-id">{myId}</h1>
-  <p>Servidor: <span id="server-status">{status}</span></p>
+{#if remote}
+  <RemoteCanvas peerId={remote.peerId} password={remote.password} {onclosed} />
+{:else}
+  <main>
+    <p>Seu ID</p>
+    <h1 id="my-id">{myId}</h1>
+    <p>Servidor: <span id="server-status">{status}</span></p>
 
-  <form onsubmit={connect}>
-    <input placeholder="ID remoto" bind:value={peerId} />
-    <input type="password" placeholder="Senha" bind:value={password} />
-    <button type="submit">Conectar</button>
-  </form>
-</main>
+    <form onsubmit={connect}>
+      <input placeholder="ID remoto" bind:value={peerId} />
+      <input type="password" placeholder="Senha" bind:value={password} />
+      <button type="submit">Conectar</button>
+    </form>
+    {#if lastError}<p class="error">{lastError}</p>{/if}
+  </main>
+{/if}
+
+<style>
+  .error {
+    color: #b00;
+  }
+</style>

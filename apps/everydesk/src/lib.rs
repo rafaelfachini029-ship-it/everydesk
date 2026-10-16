@@ -1,4 +1,6 @@
+mod commands;
 mod server;
+mod session;
 
 use hbb_common::config::Config;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -43,7 +45,25 @@ pub fn run() {
     librustdesk::ui_interface::start_option_status_sync();
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_my_id, get_server_status])
-        .run(tauri::generate_context!())
-        .expect("error while running EveryDesk");
+        .invoke_handler(tauri::generate_handler![
+            get_my_id,
+            get_server_status,
+            commands::session_connect,
+            commands::session_close,
+            commands::session_login,
+            commands::session_mouse,
+            commands::session_key,
+            commands::session_switch_display,
+            commands::session_frame_ack,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while running EveryDesk")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Closing the window mid-session: tell the peer instead of just dropping
+                // the socket, and give the io thread a moment to flush the close reason.
+                commands::close_current();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        });
 }

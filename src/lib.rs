@@ -16,7 +16,11 @@ pub use platform::{
 mod server;
 #[cfg(not(any(target_os = "ios")))]
 pub use self::server::*;
+#[cfg(not(feature = "everydesk"))]
 mod client;
+// EveryDesk: the Tauri controller drives sessions through the client/session layer.
+#[cfg(feature = "everydesk")]
+pub mod client;
 mod lan;
 #[cfg(not(any(target_os = "ios")))]
 mod rendezvous_mediator;
@@ -68,7 +72,10 @@ mod ui_interface;
 // EveryDesk: the Tauri app reads the host status the same way the Sciter UI did.
 #[cfg(feature = "everydesk")]
 pub mod ui_interface;
+#[cfg(not(feature = "everydesk"))]
 mod ui_session_interface;
+#[cfg(feature = "everydesk")]
+pub mod ui_session_interface;
 
 mod hbbs_http;
 

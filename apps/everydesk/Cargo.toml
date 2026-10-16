@@ -23,6 +23,8 @@ serde_json = "1.0"
 log = "0.4"
 rustdesk = { path = "../..", default-features = false, features = ["use_dasp", "everydesk"] }
 hbb_common = { path = "../../libs/hbb_common" }
+scrap = { path = "../../libs/scrap" }
+base = { path = "../../libs/base" }
 
 [features]
 hwcodec = ["rustdesk/hwcodec"]

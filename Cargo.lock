@@ -3033,9 +3033,11 @@ dependencies = [
 name = "everydesk"
 version = "0.1.0"
 dependencies = [
+ "base",
  "hbb_common",
  "log",
  "rustdesk",
+ "scrap",
  "serde 1.0.228",
  "serde_json 1.0.154",
  "tauri",
