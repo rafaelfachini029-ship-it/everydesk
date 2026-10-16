@@ -23,6 +23,8 @@ mod client;
 pub mod client;
 #[cfg(feature = "everydesk")]
 mod everydesk_auth;
+#[cfg(feature = "everydesk")]
+pub mod everydesk;
 mod lan;
 #[cfg(not(any(target_os = "ios")))]
 mod rendezvous_mediator;

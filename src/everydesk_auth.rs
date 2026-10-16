@@ -37,14 +37,30 @@ pub fn punch_envelope(server_key: &str, target_id: &str) -> String {
 }
 
 fn envelope_with(server_key: &str, my_id: &str, target_id: &str, ts: i64, sk: &[u8]) -> String {
-    let Some(sk) = sign::SecretKey::from_slice(sk) else {
+    let msg = format!("{SIGN_CONTEXT}|{my_id}|{target_id}|{ts}");
+    let Some(sig) = sign_detached(sk, msg.as_bytes()) else {
         // hbbs will deny this and log it; there is nothing better to send.
         log::error!("everydesk auth: invalid local key pair, sending no envelope");
         return server_key.to_owned();
     };
-    let msg = format!("{SIGN_CONTEXT}|{my_id}|{target_id}|{ts}");
-    let sig = sign::sign_detached(msg.as_bytes(), &sk);
-    format!("{server_key};v1;{my_id};{ts};{}", STANDARD.encode(sig.to_bytes()))
+    format!("{server_key};v1;{my_id};{ts};{}", STANDARD.encode(sig))
+}
+
+/// Ed25519 detached signature of `msg` with the raw secret key `sk`; `None` if `sk` is malformed.
+pub(crate) fn sign_detached(sk: &[u8], msg: &[u8]) -> Option<[u8; sign::SIGNATUREBYTES]> {
+    let sk = sign::SecretKey::from_slice(sk)?;
+    Some(sign::sign_detached(msg, &sk).to_bytes())
+}
+
+/// Checks an ed25519 detached signature; false for any malformed input.
+pub(crate) fn verify_detached(pk: &[u8], sig: &[u8], msg: &[u8]) -> bool {
+    let (Some(pk), Ok(sig)) = (
+        sign::PublicKey::from_slice(pk),
+        sign::Signature::from_bytes(sig),
+    ) else {
+        return false;
+    };
+    sign::verify_detached(&sig, msg, &pk)
 }
 
 #[cfg(test)]
@@ -77,7 +93,10 @@ mod tests {
         let parts: Vec<&str> = env.split(';').collect();
         assert_eq!(parts.len(), 5);
         assert_eq!(&parts[..4], &["SRVKEY=", "v1", "123456789", "1800000000"]);
-        assert_eq!(STANDARD.decode(parts[4]).unwrap().len(), sign::SIGNATUREBYTES);
+        assert_eq!(
+            STANDARD.decode(parts[4]).unwrap().len(),
+            sign::SIGNATUREBYTES
+        );
         assert!(server_accepts(&env, "987654321", &pk));
         assert!(!server_accepts(&env, "111111111", &pk));
     }

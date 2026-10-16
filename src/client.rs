@@ -1670,6 +1670,9 @@ impl Client {
         // binding is possible at all; WebRTC then proceeds like TCP's non-secure fallback —
         // DTLS-encrypted but reported unsecured. TCP/UDP/relay keep their existing behavior.
         let is_webrtc = conn.is_webrtc();
+        // EveryDesk: forget any earlier host pk; only a keyed handshake below records one.
+        #[cfg(feature = "everydesk")]
+        crate::everydesk::auth::set_host_pk_b(peer_id, &[]);
         let mut sign_pk = None;
         let mut option_pk = None;
         if !signed_id_pk.is_empty() {
@@ -1745,6 +1748,10 @@ impl Client {
                                         picked,
                                     },
                                 )?;
+                                // EveryDesk: the host's fresh, host-signed box pk binds our
+                                // LoginRequest signature to this connection.
+                                #[cfg(feature = "everydesk")]
+                                crate::everydesk::auth::set_host_pk_b(peer_id, &their_pk_b);
                             } else {
                                 if is_webrtc {
                                     bail!("WebRTC handshake id mismatch (possible MITM)");
@@ -3895,6 +3902,18 @@ impl LoginConfigHandler {
             avatar,
             ..Default::default()
         };
+        #[cfg(feature = "everydesk")]
+        {
+            let (sk, _) = Config::get_key_pair();
+            lr.everydesk_auth = crate::everydesk::auth::sign_login(
+                &sk,
+                &lr.username,
+                &lr.my_id,
+                lr.session_id,
+                &crate::everydesk::auth::host_pk_b(&lr.username),
+            )
+            .into();
+        }
         match self.conn_type {
             ConnType::FILE_TRANSFER => lr.set_file_transfer(FileTransfer {
                 dir: self.get_remote_dir(),

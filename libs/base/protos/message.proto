@@ -65,6 +65,25 @@ message OSLogin {
   string password = 2;
 }
 
+// EveryDesk: pairing handshake carried in Misc.everydesk.
+message PairOffer {
+  bytes pk = 1;
+  string name = 2;
+  bytes avatar = 3;
+}
+
+message PairAck { bool accepted = 1; }
+
+message Revoke {}
+
+message EveryDeskMsg {
+  oneof union {
+    PairOffer pair_offer = 1;
+    PairAck pair_ack = 2;
+    Revoke revoke = 3;
+  }
+}
+
 message LoginRequest {
   string username = 1;
   bytes password = 2;
@@ -84,6 +103,9 @@ message LoginRequest {
   string my_platform = 13;
   bytes hwid = 14;
   string avatar = 17;
+  // EveryDesk: [controller ed25519 pk (32) || sig (64)] over
+  // "ed-login-v1|host_id|my_id|session_id|base64(host ephemeral box pk)". Empty in stock builds.
+  bytes everydesk_auth = 100;
 }
 
 message Terminal {
@@ -867,6 +889,8 @@ message Misc {
     // is rebuilt, and held again, the next time it is shown, before any connection names it
     // by id again, so the shape just selected is always there to give.
     uint64 request_cursor_data = 39;
+    // EveryDesk pairing messages; never sent by stock builds.
+    EveryDeskMsg everydesk = 100;
   }
 }
 

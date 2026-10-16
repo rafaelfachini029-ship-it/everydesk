@@ -438,6 +438,12 @@ pub struct Connection {
     // Authentication retries may update credentials, but not the requested session scope.
     // A digest, so no peer-controlled strings are retained.
     login_scope: Option<[u8; 32]>,
+    // EveryDesk: our ephemeral box pk from the keyed identity handshake (None if not keyed).
+    #[cfg(feature = "everydesk")]
+    host_pk_b: Option<[u8; 32]>,
+    // EveryDesk: the controller's ed25519 pk, when its LoginRequest signature verified.
+    #[cfg(feature = "everydesk")]
+    pub(crate) controller_pk: Option<[u8; 32]>,
     peer_argb: u32,
     session_last_recv_time: Option<Arc<Mutex<Instant>>>,
     chat_unanswered: bool,
@@ -552,6 +558,7 @@ impl Connection {
         server: super::ServerPtrWeak,
         meta: super::ConnectionMeta,
         unauthorized: UnauthorizedID,
+        #[cfg(feature = "everydesk")] host_pk_b: Option<[u8; 32]>,
     ) {
         let super::ConnectionMeta {
             control_permissions,
@@ -644,6 +651,10 @@ impl Connection {
             controlled_context,
             lr: Default::default(),
             login_scope: None,
+            #[cfg(feature = "everydesk")]
+            host_pk_b,
+            #[cfg(feature = "everydesk")]
+            controller_pk: None,
             peer_argb: 0u32,
             session_last_recv_time: None,
             chat_unanswered: false,
@@ -2848,6 +2859,31 @@ impl Connection {
             }
         }
         self.video_ack_required = lr.video_ack_required;
+        // EveryDesk: who the controller is, proven by its machine key over this connection's
+        // fresh host box pk. Re-evaluated on every LoginRequest; consumed by the approval flow.
+        #[cfg(feature = "everydesk")]
+        {
+            self.controller_pk = self.host_pk_b.and_then(|host_pk_b| {
+                crate::everydesk::auth::verify_login(
+                    &lr.everydesk_auth,
+                    &Config::get_id(),
+                    &lr.my_id,
+                    lr.session_id,
+                    &host_pk_b,
+                )
+            });
+            log::info!(
+                "everydesk: controller {} {}",
+                lr.my_id,
+                if self.controller_pk.is_some() {
+                    "authenticated"
+                } else if lr.everydesk_auth.is_empty() {
+                    "unauthenticated (no signature)"
+                } else {
+                    "unauthenticated (signature rejected)"
+                }
+            );
+        }
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

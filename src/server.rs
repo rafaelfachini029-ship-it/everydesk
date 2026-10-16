@@ -226,8 +226,15 @@ pub async fn create_tcp_connection(
     };
     // Before the handshake, so its read is bounded too; lifted again at authorization.
     stream.set_max_packet_length(MAX_UNAUTHORIZED_MESSAGE);
+    // EveryDesk: our ephemeral box pk, once the controller keyed the stream with it.
+    #[cfg(feature = "everydesk")]
+    let mut host_pk_b = None;
+    #[cfg(not(feature = "everydesk"))]
+    let handshake = identity_handshake(&mut stream, secure);
+    #[cfg(feature = "everydesk")]
+    let handshake = identity_handshake(&mut stream, secure, &mut host_pk_b);
     tokio::select! {
-        handshake = identity_handshake(&mut stream, secure) => handshake?,
+        handshake = handshake => handshake?,
         _ = unauthorized.evicted() => {
             bail!("evicted to make room for a newer unauthenticated connection");
         }
@@ -245,6 +252,7 @@ pub async fn create_tcp_connection(
         }
         log::info!("wake up macos");
     }
+    #[cfg(not(feature = "everydesk"))]
     Connection::start(
         addr,
         stream,
@@ -254,12 +262,27 @@ pub async fn create_tcp_connection(
         unauthorized,
     )
     .await;
+    #[cfg(feature = "everydesk")]
+    Connection::start(
+        addr,
+        stream,
+        id,
+        Arc::downgrade(&server),
+        meta,
+        unauthorized,
+        host_pk_b,
+    )
+    .await;
     Ok(())
 }
 
 /// Our signed identity goes out and, when `secure`, the controller's reply keys `stream`.
 /// Separate so it can be raced against the connection's eviction.
-async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()> {
+async fn identity_handshake(
+    stream: &mut Stream,
+    secure: bool,
+    #[cfg(feature = "everydesk")] host_pk_b: &mut Option<[u8; 32]>,
+) -> ResultType<()> {
     let (sk, pk) = Config::get_key_pair();
     if secure && pk.len() == sign::PUBLICKEYBYTES && sk.len() == sign::SECRETKEYBYTES {
         let mut sk_ = [0u8; sign::SECRETKEYBYTES];
@@ -329,6 +352,10 @@ async fn identity_handshake(stream: &mut Stream, secure: bool) -> ResultType<()>
                                     picked: pk.kx_version,
                                 },
                             )?;
+                            #[cfg(feature = "everydesk")]
+                            {
+                                *host_pk_b = Some(our_pk_b.0);
+                            }
                         } else if pk.asymmetric_value.is_empty() {
                             Config::set_key_confirmed(false);
                             log::info!("Force to update pk");
