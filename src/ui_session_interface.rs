@@ -1774,6 +1774,33 @@ impl<T: InvokeUiSession> DerefMut for Session<T> {
 
 impl<T: InvokeUiSession> FileManager for Session<T> {}
 
+#[cfg(feature = "everydesk")]
+impl<T: InvokeUiSession> Session<T> {
+    /// EveryDesk: this host remembered us under one key and now proved another one (a
+    /// reinstalled machine, or another machine using its code). Warn; never block.
+    #[cfg(feature = "everydesk")]
+    fn everydesk_check_pinned_key(&self) {
+        let id = self.get_id();
+        let host = self.lc.read().unwrap().everydesk_host;
+        let Some(host) = host else {
+            return;
+        };
+        let changed = crate::everydesk::pairings::contacts_book()
+            .lock()
+            .unwrap()
+            .key_changed(&id, &host.sign_pk);
+        if changed {
+            log::warn!("everydesk: host {} proved another key than the pinned one", id);
+            self.msgbox(
+                "warning",
+                "A chave desta máquina mudou",
+                "Esta máquina não apresentou a chave guardada nos seus contatos. Se ela não foi reinstalada, pode ser outra máquina usando o mesmo código.",
+                "",
+            );
+        }
+    }
+}
+
 #[async_trait]
 impl<T: InvokeUiSession> Interface for Session<T> {
     fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>> {
@@ -1863,6 +1890,8 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             );
         }
         self.on_connected(self.lc.read().unwrap().conn_type);
+        #[cfg(feature = "everydesk")]
+        self.everydesk_check_pinned_key();
         #[cfg(windows)]
         {
             let mut path = std::env::temp_dir();

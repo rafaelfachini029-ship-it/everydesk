@@ -56,6 +56,34 @@ fn signed_envelope(server_key: &str, my_id: &str, ts: i64, msg: &str, sk: &[u8])
     format!("{server_key};v1;{my_id};{ts};{}", STANDARD.encode(sig))
 }
 
+/// Appended to a "no reply from hbbs" error: the envelope's `ts` must be within the server's
+/// window (±120 s), so a badly set local clock looks exactly like a server that never answers.
+/// The rendezvous protocol carries no server time, so nothing better than a hint is possible.
+pub const CLOCK_HINT: &str = "Se o problema persistir, confira o relógio do computador.";
+
+/// hbbs' `PunchHoleResponse.other_failure` when the envelope is validly signed but its `ts`
+/// is outside the server window (±120 s).
+pub const CLOCK_FAILURE: &str = "clock";
+/// What the user sees for `CLOCK_FAILURE`.
+pub const CLOCK_WRONG_MSG: &str =
+    "O relógio deste computador está errado. Acerte a data e a hora e tente de novo.";
+
+/// The user-facing text of a punch `other_failure` (the clock rejection gets its own text).
+pub fn punch_failure_text(other_failure: &str) -> &str {
+    if other_failure == CLOCK_FAILURE {
+        CLOCK_WRONG_MSG
+    } else {
+        other_failure
+    }
+}
+
+/// The error shown when a punch/relay request got no reply, with the clock hint; `None` for
+/// any other error. Keeps clear of the words `check_if_retry` looks for.
+pub fn with_clock_hint(err: &str) -> Option<String> {
+    let no_reply = err.starts_with("Failed to connect via rendezvous server") || err == "Timeout";
+    no_reply.then(|| format!("{err}. {CLOCK_HINT}"))
+}
+
 const ONLINE_CONTEXT: &str = "ed-online-v1";
 
 /// The `id` of an `OnlineRequest` (presence query): the same envelope, signed over
@@ -112,7 +140,7 @@ pub async fn query_online_signed(ids: &[String]) -> ResultType<Vec<(String, bool
             ..
         }) => decode_online_states(ids, &r.states)
             .ok_or_else(|| anyhow!("short online response")),
-        _ => bail!("no online response (denied or rate limited?)"),
+        _ => bail!("no online response (denied or rate limited?). {CLOCK_HINT}"),
     }
 }
 
@@ -197,6 +225,44 @@ mod tests {
         assert_eq!(out.len(), 10);
         assert!(decode_online_states(&ids, &states[..1]).is_none());
         assert_eq!(decode_online_states(&[], &[]).unwrap(), vec![]);
+    }
+
+    /// Known-answer vector shared with everydesk-server (`known_answer_vector`, its
+    /// docs/protocolo-everydesk-vector.md; mirrored in our docs/protocolo-everydesk-vector.md):
+    /// seed = bytes 00..1f, server key "SRVKEY", my_id 123456789, target 987654321,
+    /// ts 1800000000. Both repos must produce these exact envelopes.
+    #[test]
+    fn envelopes_known_answer() {
+        let seed: [u8; 32] = std::array::from_fn(|i| i as u8);
+        let (pk, sk) = sign::keypair_from_seed(&sign::Seed(seed));
+        assert_eq!(STANDARD.encode(pk.0), KAT_PK_B64);
+        let punch = envelope_with("SRVKEY", "123456789", "987654321", 1_800_000_000, &sk.0);
+        assert_eq!(punch, KAT_PUNCH);
+        assert!(server_accepts(&punch, "987654321", &pk));
+        let online = online_envelope_with("SRVKEY", "123456789", 1_800_000_000, &sk.0);
+        assert_eq!(online, KAT_ONLINE);
+    }
+
+    const KAT_PK_B64: &str = "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=";
+    const KAT_PUNCH: &str = "SRVKEY;v1;123456789;1800000000;YJ7AacQGlO9/sFaHhtKSUDdjP5YQrSTDP9k9T7RPIQhAFTsqNfnlwMO1ifWwcnJuUxWEakavEgRpQtYhzbrNBA==";
+    const KAT_ONLINE: &str = "SRVKEY;v1;123456789;1800000000;K4o10Ltj36N69t9EPu7drFemTzQtDvuqvoQ1ijCniecHoVbOiG2HWH+u06GbF0EqIkIgNSy+BhA8Wi69QS/6Ag==";
+
+    #[test]
+    fn clock_hint_only_for_no_reply() {
+        assert!(with_clock_hint("Failed to connect via rendezvous server")
+            .unwrap()
+            .ends_with(CLOCK_HINT));
+        assert!(with_clock_hint("Timeout").is_some());
+        assert!(with_clock_hint("Remote desktop is offline").is_none());
+        assert!(with_clock_hint(CLOCK_WRONG_MSG).is_none());
+        assert_eq!(punch_failure_text("clock"), CLOCK_WRONG_MSG);
+        assert_eq!(punch_failure_text("other"), "other");
+        // The hint does not change the retry decision.
+        let t = with_clock_hint("Timeout").unwrap();
+        assert_eq!(
+            crate::client::check_if_retry("error", "Connection Error", &t, false),
+            crate::client::check_if_retry("error", "Connection Error", "Timeout", false)
+        );
     }
 
     #[test]

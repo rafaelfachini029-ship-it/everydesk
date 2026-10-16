@@ -409,6 +409,12 @@ impl Client {
         match res {
             Err(err) => {
                 let err_str = err.to_string();
+                // EveryDesk: hbbs never answering may be this machine's clock (the signed
+                // envelope's timestamp is outside the server window): say so.
+                #[cfg(feature = "everydesk")]
+                if let Some(hinted) = crate::everydesk_auth::with_clock_hint(&err_str) {
+                    bail!(hinted);
+                }
                 if err_str.starts_with("Failed") {
                     bail!(err_str + ": Please try later");
                 } else {
@@ -1024,6 +1030,14 @@ impl Client {
                 match msg_in.union {
                     Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
                         if ph.socket_addr.is_empty() {
+                            #[cfg(feature = "everydesk")]
+                            if !ph.other_failure.is_empty() {
+                                bail!(crate::everydesk_auth::punch_failure_text(
+                                    &ph.other_failure
+                                )
+                                .to_owned());
+                            }
+                            #[cfg(not(feature = "everydesk"))]
                             if !ph.other_failure.is_empty() {
                                 bail!(ph.other_failure);
                             }
@@ -1867,6 +1881,12 @@ impl Client {
                 crate::get_next_nonkeyexchange_msg(&mut socket, Some(CONNECT_TIMEOUT)).await
             {
                 if let Some(rendezvous_message::Union::RelayResponse(rs)) = msg_in.union {
+                    #[cfg(feature = "everydesk")]
+                    if !rs.refuse_reason.is_empty() {
+                        bail!(crate::everydesk_auth::punch_failure_text(&rs.refuse_reason)
+                            .to_owned());
+                    }
+                    #[cfg(not(feature = "everydesk"))]
                     if !rs.refuse_reason.is_empty() {
                         bail!(rs.refuse_reason);
                     }
@@ -5229,9 +5249,13 @@ lazy_static::lazy_static! {
 #[inline]
 pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
     // EveryDesk: the owner ended the session on purpose; a retry would reconnect a contact
-    // whose policy needs no prompt, undoing the owner's decision.
+    // whose policy needs no prompt, undoing the owner's decision. A wrong clock does not fix
+    // itself by retrying either.
     #[cfg(feature = "everydesk")]
-    if text == LOGIN_MSG_RECONFIRM_DENIED || text == LOGIN_MSG_RECONFIRM_TIMEOUT {
+    if text == LOGIN_MSG_RECONFIRM_DENIED
+        || text == LOGIN_MSG_RECONFIRM_TIMEOUT
+        || text == crate::everydesk_auth::CLOCK_WRONG_MSG
+    {
         return false;
     }
     msgtype == "error"
