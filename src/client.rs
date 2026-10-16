@@ -383,7 +383,24 @@ impl Client {
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);
-        match Self::_start(peer, key, token, conn_type, interface.clone()).await {
+        // EveryDesk: the host keys proven by this attempt's handshake go to this session's
+        // own state, read by `create_login_msg`; a failed attempt leaves none.
+        #[cfg(feature = "everydesk")]
+        let res = {
+            let (res, keys) = crate::everydesk::auth::capture_host_keys(Self::_start(
+                peer,
+                key,
+                token,
+                conn_type,
+                interface.clone(),
+            ))
+            .await;
+            interface.get_lch().write().unwrap().everydesk_host = keys;
+            res
+        };
+        #[cfg(not(feature = "everydesk"))]
+        let res = Self::_start(peer, key, token, conn_type, interface.clone()).await;
+        match res {
             Err(err) => {
                 let err_str = err.to_string();
                 if err_str.starts_with("Failed") {
@@ -1670,9 +1687,6 @@ impl Client {
         // binding is possible at all; WebRTC then proceeds like TCP's non-secure fallback —
         // DTLS-encrypted but reported unsecured. TCP/UDP/relay keep their existing behavior.
         let is_webrtc = conn.is_webrtc();
-        // EveryDesk: forget any earlier host pk; only a keyed handshake below records one.
-        #[cfg(feature = "everydesk")]
-        crate::everydesk::auth::set_host_pk_b(peer_id, &[]);
         let mut sign_pk = None;
         let mut option_pk = None;
         if !signed_id_pk.is_empty() {
@@ -1751,7 +1765,10 @@ impl Client {
                                 // EveryDesk: the host's fresh, host-signed box pk binds our
                                 // LoginRequest signature to this connection.
                                 #[cfg(feature = "everydesk")]
-                                crate::everydesk::auth::set_host_pk_b(peer_id, &their_pk_b);
+                                crate::everydesk::auth::record_host_keys(
+                                    &sign_pk.0,
+                                    &their_pk_b,
+                                );
                             } else {
                                 if is_webrtc {
                                     bail!("WebRTC handshake id mismatch (possible MITM)");
@@ -2870,6 +2887,10 @@ struct ConnToken {
 #[derive(Default)]
 pub struct LoginConfigHandler {
     id: String,
+    /// EveryDesk: the host keys proven by this session's last keyed handshake (set by
+    /// `Client::start`); `None` before one, or when the handshake was not keyed.
+    #[cfg(feature = "everydesk")]
+    pub(crate) everydesk_host: Option<crate::everydesk::auth::HostKeys>,
     pub conn_type: ConnType,
     pub is_terminal_admin: bool,
     hash: Hash,
@@ -3910,7 +3931,10 @@ impl LoginConfigHandler {
                 &lr.username,
                 &lr.my_id,
                 lr.session_id,
-                &crate::everydesk::auth::host_pk_b(&lr.username),
+                &self
+                    .everydesk_host
+                    .map(|k| k.box_pk_b.to_vec())
+                    .unwrap_or_default(),
             )
             .into();
         }

@@ -12,7 +12,7 @@ use hbb_common::{
     log,
     sodiumoxide::crypto::sign::{self, PUBLICKEYBYTES, SIGNATUREBYTES},
 };
-use std::{collections::HashMap, sync::Mutex};
+use std::sync::{Arc, Mutex};
 
 const SIGN_CONTEXT: &str = "ed-login-v1";
 
@@ -65,27 +65,42 @@ pub fn verify_login(
     pk.try_into().ok()
 }
 
-/// Controller side: the host's ephemeral box pk from the last keyed handshake with each peer,
-/// recorded in `Client::secure_connection` and read when the `LoginRequest` is built. Keyed by
-/// peer id; two concurrent sessions to the same peer may see each other's value, in which case
-/// the signature fails on the host and the controller is merely unauthenticated (fails closed).
-static HOST_PK_B: Mutex<Option<HashMap<String, Vec<u8>>>> = Mutex::new(None);
-
-pub fn set_host_pk_b(peer_id: &str, host_pk_b: &[u8]) {
-    HOST_PK_B
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(peer_id.to_owned(), host_pk_b.to_vec());
+/// Controller side: what the last keyed handshake of one `Client::start` proved about the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HostKeys {
+    /// The host's machine ed25519 pk (rendezvous-signed `SignedId`).
+    pub sign_pk: [u8; 32],
+    /// The host's fresh box pk for this connection; binds our login signature to it.
+    pub box_pk_b: [u8; 32],
 }
 
-pub fn host_pk_b(peer_id: &str) -> Vec<u8> {
-    HOST_PK_B
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|m| m.get(peer_id).cloned())
-        .unwrap_or_default()
+hbb_common::tokio::task_local! {
+    static HOST_KEYS: Arc<Mutex<Option<HostKeys>>>;
+}
+
+/// Runs one connection attempt (`Client::_start`) with its own slot for the host keys, and
+/// returns them with the attempt's output. The slot belongs to this future alone, so concurrent
+/// sessions (even to the same peer) never see each other's keys; the caller stores them in its
+/// own session state (`LoginConfigHandler`).
+pub async fn capture_host_keys<F: std::future::Future>(f: F) -> (F::Output, Option<HostKeys>) {
+    let slot: Arc<Mutex<Option<HostKeys>>> = Default::default();
+    let out = HOST_KEYS.scope(slot.clone(), f).await;
+    let keys = *slot.lock().unwrap();
+    (out, keys)
+}
+
+/// Called by `Client::secure_connection` once a keyed handshake succeeded. Outside
+/// `capture_host_keys` (or in a spawned task) nothing is recorded: the login goes unsigned and
+/// the host treats the controller as unauthenticated (fails closed). Within one attempt the
+/// transport races may secure more than one stream; the last success wins, and if that is not
+/// the stream finally used the host rejects the signature (again fails closed).
+pub fn record_host_keys(sign_pk: &[u8], box_pk_b: &[u8]) {
+    let (Ok(sign_pk), Ok(box_pk_b)) = (sign_pk.try_into(), box_pk_b.try_into()) else {
+        return;
+    };
+    let _ = HOST_KEYS.try_with(|slot| {
+        *slot.lock().unwrap() = Some(HostKeys { sign_pk, box_pk_b });
+    });
 }
 
 #[cfg(test)]
@@ -148,5 +163,44 @@ mod tests {
         assert_eq!(verify_login(&auth, "1", "2", 3, &host_pk_b), None);
         // Bad local key: nothing is sent.
         assert!(sign_login(&[1u8; 5], "1", "2", 3, &host_pk_b).is_empty());
+    }
+
+    #[test]
+    fn host_keys_are_per_attempt() {
+        let rt = hbb_common::tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // Outside any attempt: nothing is recorded anywhere.
+            record_host_keys(&[1u8; 32], &[2u8; 32]);
+            let a = capture_host_keys(async {
+                hbb_common::tokio::task::yield_now().await;
+                record_host_keys(&[1u8; 32], &[2u8; 32]);
+            });
+            let b = capture_host_keys(async {
+                record_host_keys(&[3u8; 32], &[4u8; 32]);
+                hbb_common::tokio::task::yield_now().await;
+            });
+            let none = capture_host_keys(async {});
+            let bad = capture_host_keys(async { record_host_keys(&[1u8; 31], &[2u8; 32]) });
+            let ((_, a), (_, b), (_, none), (_, bad)) =
+                hbb_common::tokio::join!(a, b, none, bad);
+            assert_eq!(
+                a,
+                Some(HostKeys {
+                    sign_pk: [1; 32],
+                    box_pk_b: [2; 32]
+                })
+            );
+            assert_eq!(
+                b,
+                Some(HostKeys {
+                    sign_pk: [3; 32],
+                    box_pk_b: [4; 32]
+                })
+            );
+            assert_eq!(none, None);
+            assert_eq!(bad, None);
+        });
     }
 }
