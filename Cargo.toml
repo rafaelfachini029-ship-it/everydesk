@@ -28,7 +28,10 @@ use_dasp = ["dasp"]
 flutter = ["flutter_rust_bridge"]
 # EveryDesk: library build for the Tauri app; excludes the Sciter (`src/ui`) and Flutter UIs.
 everydesk = []
-default = ["use_dasp"]
+# System tray (`src/tray.rs`, pulls `tray-icon` → `muda` 0.17). Off for the EveryDesk app:
+# Tauri links `muda` 0.20, and both define the Obj-C class `MudaMenuItem` (fat-LTO link fails).
+tray = ["dep:tray-icon"]
+default = ["use_dasp", "tray"]
 hwcodec = ["scrap/hwcodec"]
 vram = ["scrap/vram"]
 mediacodec = ["scrap/mediacodec"]
@@ -171,7 +174,7 @@ piet-coregraphics = "0.6"
 foreign-types = "0.3"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
-tray-icon = { git = "https://github.com/tauri-apps/tray-icon", version = "0.21.3" }
+tray-icon = { git = "https://github.com/tauri-apps/tray-icon", version = "0.21.3", optional = true }
 tao = { git = "https://github.com/rustdesk-org/tao", branch = "dev" }
 image = "0.24"
 

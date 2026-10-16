@@ -63,3 +63,19 @@ test('keyName maps codes to input_key names', () => {
   assert.equal(keyName('IntlRo', 'ç'), 'ç')
   assert.equal(keyName('Fn', 'Fn'), null)
 })
+
+test('accumulateWheel: trackpad bursts become ~1 step per 100 px', async () => {
+  const { accumulateWheel } = await import('../src/lib/session.ts')
+  const acc = { x: 0, y: 0 }
+  let total = 0
+  for (let i = 0; i < 25; i++) total += accumulateWheel(acc, 0, 10).y // 250 px down
+  assert.equal(total, -2) // same sign as wheelSteps(0, +)
+  assert.equal(acc.y, 50)
+  // Reversing direction discards the leftover instead of cancelling the new motion.
+  assert.deepEqual(accumulateWheel(acc, 0, -100), { x: 0, y: 1 })
+  // Classic mouse notch in pixel mode (Chrome reports 100) and in line mode (3 lines).
+  assert.deepEqual(accumulateWheel({ x: 0, y: 0 }, 0, 100), { x: 0, y: -1 })
+  assert.deepEqual(accumulateWheel({ x: 0, y: 0 }, 0, 3, 1), { x: 0, y: -1 })
+  assert.deepEqual(accumulateWheel({ x: 0, y: 0 }, -120, 0), { x: 1, y: 0 })
+  assert.deepEqual(accumulateWheel({ x: 0, y: 0 }, 0, 4), { x: 0, y: 0 })
+})

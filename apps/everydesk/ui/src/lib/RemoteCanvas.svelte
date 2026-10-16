@@ -18,7 +18,7 @@
     sendKey,
     sendMouse,
     switchDisplay,
-    wheelSteps,
+    accumulateWheel,
     type DisplayRect,
     type Modifiers,
     type MsgBox,
@@ -100,25 +100,52 @@
   }
 
   let lastPos = { x: 0, y: 0 }
-  function onMouseMove(e: MouseEvent) {
+  // What the peer currently believes is pressed, so it can be released if this window
+  // loses focus mid-press (otherwise the key/button sticks on the remote side).
+  const heldButtons = new Set<number>()
+  const heldKeys = new Set<string>()
+  const wheelAcc = { x: 0, y: 0 }
+  const NO_MODS: Modifiers = { alt: false, ctrl: false, shift: false, command: false }
+
+  function sendButton(b: number, down: boolean, e: MouseEvent) {
+    if (b === MouseButton.none) return
+    if (down) heldButtons.add(b)
+    else if (!heldButtons.delete(b)) return // never told the peer it was down
+    const p = toRemote(e) ?? lastPos
+    sendMouse(mouseMask(b, down ? MouseEvt.down : MouseEvt.up), p.x, p.y, mods(e))
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    // A second button pressed/released while another is held arrives as a pointermove.
+    if (e.button >= 0) {
+      const bit = e.button === 1 ? 4 : e.button === 2 ? 2 : 1 << e.button
+      sendButton(domButton(e.button), (e.buttons & bit) !== 0, e)
+    }
     const p = toRemote(e)
     if (!p) return
     lastPos = p
     sendMouse(mouseMask(MouseButton.none, MouseEvt.move), p.x, p.y, mods(e))
   }
-  function onMouseButton(e: MouseEvent, event: number) {
+  function onPointerDown(e: PointerEvent) {
     e.preventDefault()
     canvas.focus()
-    const b = domButton(e.button)
-    if (b === MouseButton.none) return
-    const p = toRemote(e) ?? lastPos
-    sendMouse(mouseMask(b, event), p.x, p.y, mods(e))
+    // Capture so the matching pointerup arrives even if released outside the window.
+    canvas.setPointerCapture(e.pointerId)
+    sendButton(domButton(e.button), true, e)
+  }
+  function onPointerUp(e: PointerEvent) {
+    e.preventDefault()
+    sendButton(domButton(e.button), false, e)
+    if (e.buttons === 0 && canvas.hasPointerCapture(e.pointerId)) {
+      canvas.releasePointerCapture(e.pointerId)
+    }
   }
   function onWheel(e: WheelEvent) {
     e.preventDefault()
-    const s = wheelSteps(e.deltaX, e.deltaY)
-    if (s.x === 0 && s.y === 0) return
-    sendMouse(mouseMask(MouseButton.none, MouseEvt.wheel), s.x, s.y, mods(e))
+    const s = accumulateWheel(wheelAcc, e.deltaX, e.deltaY, e.deltaMode)
+    const mask = mouseMask(MouseButton.none, MouseEvt.wheel)
+    for (let i = 0; i < Math.abs(s.x); i++) sendMouse(mask, Math.sign(s.x), 0, mods(e))
+    for (let i = 0; i < Math.abs(s.y); i++) sendMouse(mask, 0, Math.sign(s.y), mods(e))
   }
 
   function onKey(e: KeyboardEvent, down: boolean) {
@@ -126,7 +153,21 @@
     const name = keyName(e.code, e.key)
     if (!name) return
     e.preventDefault()
+    if (down) heldKeys.add(name)
+    else heldKeys.delete(name)
     sendKey(name, down, false, mods(e))
+  }
+
+  /** Window lost focus: send "up" for everything the peer still holds. */
+  function releaseAll() {
+    for (const name of heldKeys) sendKey(name, false, false, NO_MODS)
+    heldKeys.clear()
+    for (const b of heldButtons) {
+      sendMouse(mouseMask(b, MouseEvt.up), lastPos.x, lastPos.y, NO_MODS)
+    }
+    heldButtons.clear()
+    wheelAcc.x = 0
+    wheelAcc.y = 0
   }
 
   function disconnect() {
@@ -167,8 +208,11 @@
     ]
     const down = (e: KeyboardEvent) => onKey(e, true)
     const up = (e: KeyboardEvent) => onKey(e, false)
+    const hidden = () => document.hidden && releaseAll()
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
+    window.addEventListener('blur', releaseAll)
+    document.addEventListener('visibilitychange', hidden)
     // Listeners are registered before connecting so no early event is lost.
     Promise.all(unlisten)
       .then(() => connect(peerId, password, onFrame))
@@ -179,6 +223,8 @@
     return () => {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', releaseAll)
+      document.removeEventListener('visibilitychange', hidden)
       unlisten.forEach((p) => p.then((f) => f()))
     }
   })
@@ -188,9 +234,9 @@
   <canvas
     bind:this={canvas}
     tabindex="0"
-    onmousemove={onMouseMove}
-    onmousedown={(e) => onMouseButton(e, MouseEvt.down)}
-    onmouseup={(e) => onMouseButton(e, MouseEvt.up)}
+    onpointermove={onPointerMove}
+    onpointerdown={onPointerDown}
+    onpointerup={onPointerUp}
     onwheel={onWheel}
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
@@ -240,6 +286,7 @@
     display: block;
     outline: none;
     cursor: default;
+    touch-action: none;
   }
   .bar {
     position: absolute;

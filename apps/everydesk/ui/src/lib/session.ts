@@ -121,6 +121,41 @@ export function wheelSteps(deltaX: number, deltaY: number): { x: number; y: numb
   return { x: 0, y: -Math.sign(deltaY) }
 }
 
+/** Pixels of wheel/trackpad travel per RustDesk wheel step. */
+export const WHEEL_STEP_PX = 100
+const LINE_PX = 34 // browsers report ~3 lines per notch in line mode (3 * 34 ≥ 100)
+
+export interface WheelAcc {
+  x: number
+  y: number
+}
+
+/**
+ * Accumulates wheel deltas (a Mac trackpad fires dozens of small events per gesture) and
+ * returns how many whole steps to send per axis, signed like `wheelSteps` (Flutter's
+ * convention: scrolling down → negative). The remainder stays in `acc`; reversing
+ * direction drops the opposite remainder so a flick back responds at once.
+ */
+export function accumulateWheel(
+  acc: WheelAcc,
+  deltaX: number,
+  deltaY: number,
+  deltaMode = 0,
+): { x: number; y: number } {
+  const k = deltaMode === 1 ? LINE_PX : deltaMode === 2 ? WHEEL_STEP_PX : 1
+  const take = (prev: number, d: number): [number, number] => {
+    let v = Math.sign(d) !== 0 && Math.sign(d) !== Math.sign(prev) ? d * k : prev + d * k
+    const n = Math.trunc(v / WHEEL_STEP_PX)
+    v -= n * WHEEL_STEP_PX
+    return [n === 0 ? 0 : -n, v]
+  }
+  const [sx, ax] = take(acc.x, deltaX)
+  const [sy, ay] = take(acc.y, deltaY)
+  acc.x = ax
+  acc.y = ay
+  return { x: sx, y: sy }
+}
+
 // ---- keyboard -----------------------------------------------------------------------
 
 // `KeyboardEvent.code` → name understood by `Session::input_key` (`KEY_MAP` in

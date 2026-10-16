@@ -12,7 +12,7 @@ use librustdesk::ui_session_interface::InvokeUiSession;
 use scrap::{ImageFormat, ImageRgb};
 use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use tauri::{
@@ -25,6 +25,20 @@ pub const FRAME_HEADER_LEN: usize = 16;
 /// Above this, new frames are dropped so a hidden/slow webview cannot grow the IPC
 /// queue without bound (`Channel::send` has no backpressure).
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+/// Generation of the session the UI currently shows. Bumped by every connect and every
+/// explicit close, so a superseded session (e.g. an unreachable peer still timing out
+/// after "Desconectar") can no longer emit events or frames into the next one.
+static CURRENT_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Starts a new generation and returns it; every older handler becomes stale.
+pub fn next_gen() -> u64 {
+    CURRENT_GEN.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+pub fn is_current_gen(gen: u64) -> bool {
+    gen != 0 && CURRENT_GEN.load(Ordering::Acquire) == gen
+}
 
 pub fn encode_frame_header(display: u32, width: u32, height: u32, stride: u32) -> [u8; 16] {
     let mut h = [0u8; FRAME_HEADER_LEN];
@@ -93,15 +107,21 @@ pub struct TauriSessionHandler {
     app: Option<AppHandle>,
     frames: Option<Channel<InvokeResponseBody>>,
     in_flight: Arc<AtomicUsize>,
+    gen: u64,
 }
 
 impl TauriSessionHandler {
-    pub fn new(app: AppHandle, frames: Channel<InvokeResponseBody>) -> Self {
+    pub fn new(app: AppHandle, frames: Channel<InvokeResponseBody>, gen: u64) -> Self {
         Self {
             app: Some(app),
             frames: Some(frames),
             in_flight: Default::default(),
+            gen,
         }
+    }
+
+    pub fn is_current(&self) -> bool {
+        is_current_gen(self.gen)
     }
 
     pub fn frame_ack(&self) {
@@ -111,6 +131,10 @@ impl TauriSessionHandler {
     }
 
     pub fn emit<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        if !self.is_current() {
+            log::debug!("everydesk: dropped {event} from stale session {}", self.gen);
+            return;
+        }
         if let Some(app) = &self.app {
             if let Err(e) = app.emit(event, payload) {
                 log::warn!("everydesk: emit {event} failed: {e}");
@@ -135,6 +159,9 @@ impl TauriSessionHandler {
 impl InvokeUiSession for TauriSessionHandler {
     fn on_rgba(&self, display: usize, rgba: &mut ImageRgb) {
         let Some(ch) = &self.frames else { return };
+        if !self.is_current() {
+            return;
+        }
         let bgra = match rgba.fmt() {
             ImageFormat::ARGB => true,
             ImageFormat::ABGR => false,
@@ -258,6 +285,19 @@ impl InvokeUiSession for TauriSessionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superseded_generation_is_stale() {
+        let old = next_gen();
+        assert!(is_current_gen(old));
+        let h = TauriSessionHandler { gen: old, ..Default::default() };
+        assert!(h.is_current());
+        let new = next_gen(); // reconnect or explicit close
+        assert!(!is_current_gen(old));
+        assert!(!h.is_current());
+        assert!(is_current_gen(new));
+        assert!(!TauriSessionHandler::default().is_current()); // gen 0 never current
+    }
 
     #[test]
     fn frame_header_is_le_u32s() {

@@ -1,11 +1,11 @@
 //! Session commands for the minimal controller (one outgoing session at a time).
 //! Mirrors `flutter::session_add` + `flutter::session_start_`.
 
-use crate::session::TauriSessionHandler;
+use crate::session::{is_current_gen, next_gen, TauriSessionHandler};
 use hbb_common::rendezvous_proto::ConnType;
 use librustdesk::ui_session_interface::{io_loop, Session};
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::AtomicUsize,
     Arc, Mutex, RwLock,
 };
 use tauri::{
@@ -43,7 +43,6 @@ struct Current {
 }
 
 static SESSION: Mutex<Option<Current>> = Mutex::new(None);
-static GEN: AtomicU64 = AtomicU64::new(0);
 
 fn with_session(f: impl FnOnce(&Session<TauriSessionHandler>)) {
     if let Some(c) = SESSION.lock().unwrap().as_ref() {
@@ -51,9 +50,12 @@ fn with_session(f: impl FnOnce(&Session<TauriSessionHandler>)) {
     }
 }
 
-/// Sends `Data::Close` to the running session, if any (also used on window close).
+/// Sends `Data::Close` to the running session, if any (also used on window close), and
+/// makes it stale so its late events (timeout msgbox, displays...) are dropped.
 pub fn close_current() {
-    if let Some(c) = SESSION.lock().unwrap().take() {
+    let taken = SESSION.lock().unwrap().take();
+    if let Some(c) = taken {
+        next_gen();
         c.session.close();
     }
 }
@@ -71,7 +73,8 @@ pub fn session_connect(
     }
     close_current();
 
-    let handler = TauriSessionHandler::new(app, frames);
+    let gen = next_gen();
+    let handler = TauriSessionHandler::new(app, frames, gen);
     let session: Session<TauriSessionHandler> = Session {
         // Preset password: `client::handle_hash` hashes it with the peer's salt and logs in,
         // no UI round trip. A wrong one comes back as msgbox `re-input-password`, answered
@@ -94,7 +97,6 @@ pub fn session_connect(
         None,  // conn_token
     );
 
-    let gen = GEN.fetch_add(1, Ordering::Relaxed) + 1;
     *SESSION.lock().unwrap() = Some(Current {
         gen,
         session: session.clone(),
@@ -112,7 +114,7 @@ pub fn session_connect(
             drop(cur);
             log::info!("everydesk: session {gen} ended");
             // A newer session_connect superseded this one: its UI must not be torn down.
-            if GEN.load(Ordering::Relaxed) == gen {
+            if is_current_gen(gen) {
                 handler.emit("session:closed", ());
             }
         })
