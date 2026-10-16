@@ -43,10 +43,28 @@ type Message = RendezvousMessage;
 /// taken on the server) a new code replaces the numeric `Config::update_id()` fallback.
 #[cfg(feature = "everydesk")]
 pub static ID_REGENERATOR: std::sync::OnceLock<fn() -> String> = std::sync::OnceLock::new();
-#[cfg(feature = "everydesk")]
+// Not gated: the counter logic is pure and unit-tested in the stock build too.
+#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
 const MAX_ID_REGENERATIONS: u8 = 5;
-#[cfg(feature = "everydesk")]
+#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
 static ID_REGENERATIONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Claims the next regeneration attempt: `Some(n)` (1-based) while fewer than `max` attempts
+/// were made since the last successful registration, `None` once exhausted (saturates).
+#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
+fn claim_regeneration(counter: &std::sync::atomic::AtomicU8, max: u8) -> Option<u8> {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1))
+        .ok()
+        .map(|n| n + 1)
+}
+
+/// A successful registration (`RegisterPkResponse::OK`) gives the next collision a fresh
+/// budget of attempts.
+#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
+fn reset_regenerations(counter: &std::sync::atomic::AtomicU8) {
+    counter.store(0, Ordering::SeqCst);
+}
 
 #[cfg(feature = "everydesk")]
 fn regenerate_id() {
@@ -54,16 +72,14 @@ fn regenerate_id() {
         Config::update_id();
         return;
     };
-    let n = ID_REGENERATIONS.fetch_add(1, Ordering::SeqCst) + 1;
-    if n > MAX_ID_REGENERATIONS {
-        ID_REGENERATIONS.store(MAX_ID_REGENERATIONS + 1, Ordering::SeqCst);
+    let Some(n) = claim_regeneration(&ID_REGENERATIONS, MAX_ID_REGENERATIONS) else {
         log::error!(
             "everydesk: id {} taken, giving up after {} regenerations",
             Config::get_id(),
             MAX_ID_REGENERATIONS
         );
         return;
-    }
+    };
     let old = Config::get_id();
     let new = generate();
     Config::set_id(&new);
@@ -543,6 +559,8 @@ impl RendezvousMediator {
                         Config::set_host_key_confirmed(&self.host_prefix, true);
                         *SOLVING_PK_MISMATCH.lock().await = "".to_owned();
                         NEEDS_DEPLOY.store(false, Ordering::SeqCst);
+                        #[cfg(feature = "everydesk")]
+                        reset_regenerations(&ID_REGENERATIONS);
                         #[cfg(target_os = "android")]
                         reset_needs_deploy_notification();
                     }
@@ -1767,6 +1785,19 @@ impl Drop for CheckIfResendPk {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn id_regeneration_budget_resets_after_ok() {
+        use super::{claim_regeneration, reset_regenerations};
+        let c = std::sync::atomic::AtomicU8::new(0);
+        for n in 1..=5 {
+            assert_eq!(claim_regeneration(&c, 5), Some(n));
+        }
+        assert_eq!(claim_regeneration(&c, 5), None);
+        assert_eq!(claim_regeneration(&c, 5), None);
+        reset_regenerations(&c);
+        assert_eq!(claim_regeneration(&c, 5), Some(1));
+    }
+
     use super::{
         connection_meta, mpsc, socket_client, tokio, udp_nat_listen, AnswererSlot, Arc, IceRoute,
         IntoTargetAddr, Ordering, PunchHoleSent, RendezvousMediator, RendezvousMessage,

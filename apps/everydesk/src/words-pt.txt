@@ -29,7 +29,6 @@ bloco
 bode
 boi
 bola
-bolha
 bolo
 bolsa
 bonde
@@ -61,7 +60,6 @@ carta
 casco
 claro
 cobra
-cobre
 coco
 cofre
 cola
@@ -123,7 +121,6 @@ fruta
 fruto
 funil
 gaita
-galho
 galo
 ganso
 garfo
@@ -147,7 +144,6 @@ jogo
 jovem
 julho
 junco
-junho
 junta
 lago
 largo
@@ -168,15 +164,12 @@ livre
 livro
 lobo
 longo
-louro
 lua
-luar
 lula
 lunar
 luva
 maio
 mala
-malha
 malte
 manga
 manso
@@ -193,7 +186,6 @@ mel
 menta
 mesa
 metal
-mico
 milho
 miolo
 moeda
@@ -230,7 +222,6 @@ ostra
 ouro
 pacto
 palco
-palha
 palma
 palmo
 pampa
@@ -249,7 +240,6 @@ peru
 piano
 pilar
 pinho
-pino
 pipa
 pista
 placa
@@ -261,9 +251,7 @@ poeta
 polar
 polvo
 pomar
-pombo
 ponte
-ponto
 porta
 porto
 poste
@@ -280,7 +268,6 @@ pulso
 puma
 puro
 raio
-rama
 ramo
 rampa
 real
@@ -299,14 +286,12 @@ ritmo
 rival
 roda
 rolo
-rota
 rua
 rumo
 rural
 sabre
 safra
 saia
-sal
 sala
 salto
 samba
@@ -316,14 +301,12 @@ selva
 senda
 serra
 sino
-siri
 soja
 sol
 solar
 som
 sopa
 suco
-sul
 sutil
 taco
 tampa
@@ -332,7 +315,6 @@ tarde
 tatu
 teia
 tela
-telha
 tempo
 tenda
 termo
@@ -378,7 +360,6 @@ verso
 vespa
 vidro
 vila
-vinha
 vinho
 viola
 vital
