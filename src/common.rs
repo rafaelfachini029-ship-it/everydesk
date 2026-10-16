@@ -1140,6 +1140,13 @@ pub fn get_api_server(api: String, custom: String) -> String {
     res
 }
 
+/// EveryDesk has no API server: no heartbeat/sysinfo, audit or address-book posts to :21114.
+#[cfg(feature = "everydesk")]
+fn get_api_server_(_api: String, _custom: String) -> String {
+    "".to_owned()
+}
+
+#[cfg(not(feature = "everydesk"))]
 fn get_api_server_(api: String, custom: String) -> String {
     #[cfg(windows)]
     if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
@@ -2357,6 +2364,11 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
     ThrottledInterval::new(i)
 }
 
+/// EveryDesk: branding and server are fixed by the app; a `custom.txt` must not rewrite them.
+#[cfg(feature = "everydesk")]
+pub fn load_custom_client() {}
+
+#[cfg(not(feature = "everydesk"))]
 pub fn load_custom_client() {
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {

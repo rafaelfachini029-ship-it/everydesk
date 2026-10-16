@@ -2100,6 +2100,13 @@ pub fn prepare_custom_client_update() -> ResultType<bool> {
     Ok(true)
 }
 
+/// EveryDesk: the exe name must never select a server/key/api (renamed-exe licensing).
+#[cfg(feature = "everydesk")]
+pub fn get_license_from_exe_name() -> ResultType<CustomServer> {
+    hbb_common::bail!("exe-name license disabled in EveryDesk")
+}
+
+#[cfg(not(feature = "everydesk"))]
 pub fn get_license_from_exe_name() -> ResultType<CustomServer> {
     let mut exe = std::env::current_exe()?.to_str().unwrap_or("").to_owned();
     // if defined portable appname entry, replace original executable name with it.

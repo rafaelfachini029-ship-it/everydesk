@@ -40,9 +40,27 @@ fn should_start_gui(core_main_result: Option<&[String]>) -> bool {
     matches!(core_main_result, Some(args) if args.is_empty())
 }
 
+/// Product name. The engine derives the config/log dirs, IPC socket/pipe names, service
+/// name and macOS plists from `hbb_common::config::APP_NAME`.
+pub const APP_NAME: &str = "EveryDesk";
+#[cfg(target_os = "macos")]
+const ORG: &str = "online.vpsfachini";
+
+/// Must run before anything touches `Config` (lazily loaded from the APP_NAME path), the
+/// log or IPC, so it is the first statement of `main`.
+pub fn apply_branding() {
+    *hbb_common::config::APP_NAME.write().unwrap() = APP_NAME.to_owned();
+    #[cfg(target_os = "macos")]
+    {
+        *hbb_common::config::ORG.write().unwrap() = ORG.to_owned();
+    }
+}
+
 /// Process entry point. The host spawns this same exe with engine modes (hwcodec probe,
 /// service, CLI settings); those must run headless, never as a second app window.
 pub fn main() {
+    // Branding first: every path below (log, config, IPC) is derived from APP_NAME.
+    apply_branding();
     // Same per-mode log directory core_main would pick, except a plain launch logs under
     // `everydesk`; initialized here so the config fixes below are logged too.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -118,6 +136,16 @@ fn run() {
 #[cfg(test)]
 mod tests {
     use super::{log_name, should_start_gui};
+
+    #[test]
+    fn app_name_is_everydesk() {
+        super::apply_branding();
+        assert_eq!(*hbb_common::config::APP_NAME.read().unwrap(), "EveryDesk");
+        let p = hbb_common::config::Config::path("x");
+        let p = p.to_string_lossy();
+        assert!(p.contains("EveryDesk"), "{p}");
+        assert!(!p.contains("RustDesk"), "{p}");
+    }
 
     #[test]
     fn log_dir_per_mode() {

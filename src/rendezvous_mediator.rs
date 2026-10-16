@@ -278,6 +278,8 @@ impl RendezvousMediator {
                 sleep(1.).await;
             }
         }
+        // EveryDesk: no API server, so no heartbeat/sysinfo sync to :21114.
+        #[cfg(not(feature = "everydesk"))]
         crate::hbbs_http::sync::start();
         #[cfg(target_os = "windows")]
         if crate::platform::is_installed() && crate::is_server() {
