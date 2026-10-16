@@ -2,6 +2,7 @@ mod cm;
 mod commands;
 mod server;
 mod session;
+pub mod memorable;
 
 use hbb_common::config::Config;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -65,6 +66,8 @@ pub fn main() {
     // `everydesk`; initialized here so the config fixes below are logged too.
     let args: Vec<String> = std::env::args().skip(1).collect();
     hbb_common::init_log(false, &log_name(&args));
+    // The id must be a memorable code before any mode registers with the server.
+    ensure_memorable_id();
     // Pinned server and click approval first: every mode below may register or take logins.
     server::apply_server_config();
     cm::force_click_approve_mode();
@@ -73,6 +76,18 @@ pub fn main() {
         run();
     } else if let Some(args) = res {
         log::warn!("everydesk: unsupported arguments, exiting: {args:?}");
+    }
+}
+
+/// First boot (or an id from before EveryDesk, e.g. the numeric MAC-derived one): replace it
+/// with a memorable code, and let the engine regenerate one if the server says it is taken.
+fn ensure_memorable_id() {
+    let _ = librustdesk::ID_REGENERATOR.set(memorable::new_code);
+    let id = Config::get_id();
+    if !memorable::is_valid_code(&id) {
+        let code = memorable::new_code();
+        Config::set_id(&code);
+        log::info!("everydesk: id {id:?} replaced by memorable code {code}");
     }
 }
 

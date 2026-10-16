@@ -39,6 +39,39 @@ use crate::{
 
 type Message = RendezvousMessage;
 
+/// EveryDesk: the app registers its memorable-code generator here; on `UUID_MISMATCH` (id
+/// taken on the server) a new code replaces the numeric `Config::update_id()` fallback.
+#[cfg(feature = "everydesk")]
+pub static ID_REGENERATOR: std::sync::OnceLock<fn() -> String> = std::sync::OnceLock::new();
+#[cfg(feature = "everydesk")]
+const MAX_ID_REGENERATIONS: u8 = 5;
+#[cfg(feature = "everydesk")]
+static ID_REGENERATIONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(feature = "everydesk")]
+fn regenerate_id() {
+    let Some(generate) = ID_REGENERATOR.get() else {
+        Config::update_id();
+        return;
+    };
+    let n = ID_REGENERATIONS.fetch_add(1, Ordering::SeqCst) + 1;
+    if n > MAX_ID_REGENERATIONS {
+        ID_REGENERATIONS.store(MAX_ID_REGENERATIONS + 1, Ordering::SeqCst);
+        log::error!(
+            "everydesk: id {} taken, giving up after {} regenerations",
+            Config::get_id(),
+            MAX_ID_REGENERATIONS
+        );
+        return;
+    }
+    let old = Config::get_id();
+    let new = generate();
+    Config::set_id(&new);
+    log::warn!(
+        "everydesk: id {old} taken on the server, regenerated ({n}/{MAX_ID_REGENERATIONS}): {new}"
+    );
+}
+
 fn connection_meta(
     control_permissions: Option<ControlPermissions>,
     controlled_context: Option<ControlledContext>,
@@ -1292,6 +1325,9 @@ impl RendezvousMediator {
             if solving.is_empty() || *solving == self.host {
                 log::info!("UUID_MISMATCH received from {}", self.host);
                 Config::set_key_confirmed(false);
+                #[cfg(feature = "everydesk")]
+                regenerate_id();
+                #[cfg(not(feature = "everydesk"))]
                 Config::update_id();
                 *solving = self.host.clone();
             } else {
