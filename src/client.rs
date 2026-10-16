@@ -977,6 +977,11 @@ impl Client {
                 my_addr,
                 peer
             );
+            // EveryDesk: a fresh envelope per attempt, hbbs rejects a replayed (id, ts).
+            #[cfg(feature = "everydesk")]
+            if let Some(rendezvous_message::Union::PunchHoleRequest(ph)) = msg_out.union.as_mut() {
+                ph.licence_key = crate::everydesk_auth::punch_envelope(&key, &peer);
+            }
             socket.send(&msg_out).await?;
             // below timeout should not bigger than hbbs's connection timeout.
             let attempt_deadline = Instant::now() + Duration::from_millis((i * 3000) as u64);
@@ -1822,6 +1827,8 @@ impl Client {
                 relay_server: relay_server.clone(),
                 secure,
                 switch_code: switch_code.to_owned(),
+                #[cfg(feature = "everydesk")]
+                licence_key: crate::everydesk_auth::punch_envelope(key, peer),
                 ..Default::default()
             });
             socket.send(&msg_out).await?;

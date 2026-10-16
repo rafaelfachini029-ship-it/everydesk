@@ -21,6 +21,8 @@ mod client;
 // EveryDesk: the Tauri controller drives sessions through the client/session layer.
 #[cfg(feature = "everydesk")]
 pub mod client;
+#[cfg(feature = "everydesk")]
+mod everydesk_auth;
 mod lan;
 #[cfg(not(any(target_os = "ios")))]
 mod rendezvous_mediator;
