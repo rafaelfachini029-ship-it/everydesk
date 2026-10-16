@@ -1,0 +1,121 @@
+name: EveryDesk Windows build
+
+# Builds the Tauri app (apps/everydesk) for Windows x64.
+# Adapted from the upstream job `build-for-windows-flutter`
+# (.github/workflows-upstream/flutter-build.yml), keeping only what the
+# Tauri build needs (no Flutter, no bridge, no drivers, no signing).
+
+on:
+  push:
+    branches: [main-everydesk]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: "15.0.6"
+  # Must match "builtin-baseline" in vcpkg.json.
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
+  RUST_TARGET: "x86_64-pc-windows-msvc"
+
+jobs:
+  build-everydesk-windows:
+    name: everydesk (x86_64-pc-windows-msvc)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Set LIBCLANG_PATH
+        shell: bash
+        run: echo "LIBCLANG_PATH=${LLVM_PATH}\\bin" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: everydesk-windows-2022
+          workspaces: ". -> target"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/everydesk/ui/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir apps/everydesk/ui install --frozen-lockfile
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_DEFAULT_TRIPLET }}
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet ${{ env.VCPKG_DEFAULT_TRIPLET }} \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build EveryDesk
+        working-directory: apps/everydesk
+        run: cargo tauri build --no-bundle --features hwcodec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: everydesk-windows-x64
+          path: target/release/everydesk.exe
+          if-no-files-found: error
