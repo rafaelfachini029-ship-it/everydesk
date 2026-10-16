@@ -7,6 +7,7 @@
   import {
     CM_EVENTS,
     remainingSeconds,
+    type CmSnapshot,
     type Connected,
     type Incoming,
     type Removed,
@@ -50,6 +51,21 @@
       }),
       listen<Removed>(CM_EVENTS.removed, (e) => drop(e.payload.conn_id)),
     ]
+    // Events sent before the listeners existed are not replayed: hydrate from the backend.
+    Promise.all(unlisten)
+      .then(() => invoke<CmSnapshot>('cm_pending'))
+      .then((snap) => {
+        const t = Date.now()
+        for (const { age_ms, ...p } of snap.pending) {
+          if (!pending.some((x) => x.conn_id === p.conn_id)) {
+            pending = [...pending, { ...p, start: t - age_ms }]
+          }
+        }
+        for (const c of snap.connected) {
+          if (!connected.some((x) => x.conn_id === c.conn_id)) connected = [...connected, c]
+        }
+      })
+      .catch((e) => console.error('cm_pending', e))
     const timer = setInterval(() => {
       now = Date.now()
       // The engine closes an unanswered prompt itself; just drop the card at 0.

@@ -87,7 +87,8 @@ const ID_WHITELIST_FAILURE_DECAY_MINUTES: i32 = 10;
 const LOGIN_GRACE: Duration = Duration::from_secs(180);
 /// EveryDesk: in click-approve mode the accept prompt is answered within this long, or the
 /// controller is told `LOGIN_MSG_TIMEOUT` and the connection closes. Password logins keep
-/// `LOGIN_GRACE`.
+/// `LOGIN_GRACE`. Only the `everydesk` build enforces it; stock builds keep `LOGIN_GRACE`.
+#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
 const CLICK_APPROVE_TIMEOUT_SECS: u64 = 60;
 /// Connections between accept and authorization, across every transport: the resource bound.
 /// At this many a further arrival is refused and the oldest is told to go, one at a time.
@@ -188,17 +189,20 @@ async fn login_deadline(authorized: bool, started: Instant) {
 }
 
 /// The instant a click-approve prompt shown at `prompted` expires.
+#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
 fn click_approve_deadline_at(prompted: Instant) -> Instant {
     prompted + Duration::from_secs(CLICK_APPROVE_TIMEOUT_SECS)
 }
 
 /// Resolves when the click-approve prompt shown at `prompted` expires; never when no prompt
-/// is pending or the connection has authorized.
+/// is pending, the connection has authorized, or this is not the `everydesk` build.
 async fn click_approve_deadline(authorized: bool, prompted: Option<Instant>) {
-    match prompted {
-        Some(p) if !authorized => time::sleep_until(click_approve_deadline_at(p)).await,
-        _ => std::future::pending().await,
+    #[cfg(feature = "everydesk")]
+    if let (false, Some(p)) = (authorized, prompted) {
+        return time::sleep_until(click_approve_deadline_at(p)).await;
     }
+    let _ = (authorized, prompted);
+    std::future::pending().await
 }
 
 lazy_static::lazy_static! {
@@ -7167,6 +7171,7 @@ mod test {
         UNAUTHORIZED_CONNS.lock().unwrap().len()
     }
 
+    #[cfg(feature = "everydesk")]
     #[test]
     fn test_click_approve_deadline_is_60s() {
         let t = Instant::now();

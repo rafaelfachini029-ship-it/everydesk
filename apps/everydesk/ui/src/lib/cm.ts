@@ -23,6 +23,17 @@ export interface Connected {
   name: string
 }
 
+export interface PendingSnapshot extends Incoming {
+  /** How long the prompt has been up (ms) when `cm_pending` answered. */
+  age_ms: number
+}
+
+/** `cm_pending` result: what the UI shows, for hydrating after mount. */
+export interface CmSnapshot {
+  pending: PendingSnapshot[]
+  connected: Connected[]
+}
+
 export interface Removed {
   conn_id: number
 }

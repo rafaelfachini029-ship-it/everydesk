@@ -65,6 +65,7 @@ pub fn run() {
             commands::session_frame_ack,
             cm::cm_authorize,
             cm::cm_close,
+            cm::cm_pending,
         ])
         .build(tauri::generate_context!())
         .expect("error while running EveryDesk")

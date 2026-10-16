@@ -6,6 +6,7 @@
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
 use serde::Serialize;
+use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Clone)]
@@ -74,9 +75,87 @@ pub fn event_from(
     }
 }
 
+/// What the UI shows, kept here too so a webview that mounts after an event can hydrate
+/// through `cm_pending` (Tauri events are not replayed).
+#[derive(Default)]
+pub struct CmState {
+    pending: BTreeMap<i32, (Incoming, Instant)>,
+    connected: BTreeMap<i32, Connected>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct PendingSnapshot {
+    #[serde(flatten)]
+    pub incoming: Incoming,
+    /// How long the prompt has been up, so the UI countdown starts at the right second.
+    pub age_ms: u64,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
+pub struct CmSnapshot {
+    pub pending: Vec<PendingSnapshot>,
+    pub connected: Vec<Connected>,
+}
+
+impl CmState {
+    pub fn apply(&mut self, ev: &CmEvent, now: Instant) {
+        match ev {
+            CmEvent::Incoming(p) => {
+                self.connected.remove(&p.conn_id);
+                self.pending.insert(p.conn_id, (p.clone(), now));
+            }
+            CmEvent::Connected(c) => {
+                self.pending.remove(&c.conn_id);
+                self.connected.insert(c.conn_id, c.clone());
+            }
+        }
+    }
+
+    /// The UI accepted `conn_id`: its prompt becomes a connected session.
+    pub fn authorize(&mut self, conn_id: i32) {
+        if let Some((p, _)) = self.pending.remove(&conn_id) {
+            self.connected.insert(
+                conn_id,
+                Connected {
+                    conn_id,
+                    peer_id: p.peer_id,
+                    name: p.name,
+                },
+            );
+        }
+    }
+
+    pub fn remove(&mut self, conn_id: i32) {
+        self.pending.remove(&conn_id);
+        self.connected.remove(&conn_id);
+    }
+
+    pub fn snapshot(&self, now: Instant) -> CmSnapshot {
+        CmSnapshot {
+            pending: self
+                .pending
+                .values()
+                .map(|(p, at)| PendingSnapshot {
+                    incoming: p.clone(),
+                    age_ms: now.saturating_duration_since(*at).as_millis() as u64,
+                })
+                .collect(),
+            connected: self.connected.values().cloned().collect(),
+        }
+    }
+}
+
+static STATE: Mutex<Option<CmState>> = Mutex::new(None);
+
+fn with_state<R>(f: impl FnOnce(&mut CmState) -> R) -> R {
+    f(STATE.lock().unwrap().get_or_insert_with(CmState::default))
+}
+
 impl TauriCM {
     fn emit_client(&self, client: &Client) {
-        let r = match event_for(client) {
+        let ev = event_for(client);
+        with_state(|s| s.apply(&ev, Instant::now()));
+        let r = match ev {
             CmEvent::Incoming(p) => {
                 log::info!("everydesk: incoming #{} from {}", p.conn_id, p.peer_id);
                 self.app.emit("cm:incoming", p)
@@ -99,6 +178,7 @@ impl InvokeUiCM for TauriCM {
 
     fn remove_connection(&self, id: i32, _close: bool) {
         log::info!("everydesk: cm removed #{id}");
+        with_state(|s| s.remove(id));
         if let Err(e) = self.app.emit("cm:removed", Removed { conn_id: id }) {
             log::error!("everydesk: cm emit failed: {e}");
         }
@@ -142,6 +222,13 @@ pub fn start(app: AppHandle) {
 pub fn cm_authorize(conn_id: i32) {
     log::info!("everydesk: authorize #{conn_id}");
     ui_cm_interface::authorize(conn_id);
+    with_state(|s| s.authorize(conn_id));
+}
+
+/// Current prompts and sessions, for the UI to hydrate once on mount.
+#[tauri::command]
+pub fn cm_pending() -> CmSnapshot {
+    with_state(|s| s.snapshot(Instant::now()))
 }
 
 #[tauri::command]
@@ -177,6 +264,47 @@ mod tests {
                 name: "pc".into(),
             })
         );
+    }
+
+    #[test]
+    fn state_tracks_prompts_and_sessions() {
+        let t0 = Instant::now();
+        let mut s = CmState::default();
+        s.apply(&event_from(1, false, "111", "a", false), t0);
+        s.apply(&event_from(2, false, "222", "b", false), t0);
+        s.apply(&event_from(3, true, "333", "c", false), t0);
+        let snap = s.snapshot(t0 + std::time::Duration::from_millis(1500));
+        assert_eq!(snap.pending.len(), 2);
+        assert_eq!(snap.pending[0].age_ms, 1500);
+        assert_eq!(snap.connected.len(), 1);
+
+        s.authorize(1);
+        s.remove(2);
+        let snap = s.snapshot(t0);
+        assert!(snap.pending.is_empty());
+        assert_eq!(
+            snap.connected.iter().map(|c| c.conn_id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        s.remove(1);
+        s.remove(3);
+        assert_eq!(s.snapshot(t0), CmSnapshot::default());
+    }
+
+    #[test]
+    fn pending_snapshot_serializes_flat() {
+        let v = serde_json::to_value(PendingSnapshot {
+            incoming: Incoming {
+                conn_id: 4,
+                peer_id: "9".into(),
+                name: "n".into(),
+                is_file_transfer: false,
+            },
+            age_ms: 10,
+        })
+        .unwrap();
+        assert_eq!(v["conn_id"], 4);
+        assert_eq!(v["age_ms"], 10);
     }
 
     #[test]
