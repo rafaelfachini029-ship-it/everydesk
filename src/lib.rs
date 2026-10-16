@@ -22,7 +22,7 @@ mod client;
 #[cfg(feature = "everydesk")]
 pub mod client;
 #[cfg(feature = "everydesk")]
-mod everydesk_auth;
+pub mod everydesk_auth;
 #[cfg(feature = "everydesk")]
 pub mod everydesk;
 mod lan;

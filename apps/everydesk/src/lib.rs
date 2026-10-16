@@ -1,5 +1,6 @@
 mod cm;
 mod commands;
+mod contacts;
 mod server;
 mod session;
 pub mod memorable;
@@ -117,6 +118,7 @@ fn run() {
             // `_cm` first, so the host's first login finds it (`try_start_cm`) and the
             // engine never spawns a `--cm` window.
             cm::start(app.handle().clone());
+            contacts::start(app.handle().clone());
             // As the Sciter GUI did in core_main: reuse a running `--server` over IPC,
             // otherwise start the host (IPC + rendezvous registration) in this process.
             std::thread::spawn(|| librustdesk::start_server(false, false));
@@ -135,6 +137,7 @@ fn run() {
             cm::cm_authorize,
             cm::cm_close,
             cm::cm_pending,
+            contacts::contacts_presence,
         ])
         .build(tauri::generate_context!())
         .expect("error while running EveryDesk")
