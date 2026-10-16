@@ -9,10 +9,10 @@
     policyFromKey,
     policyKey,
     policyLabel,
-    policyOptions,
     type Contact,
     type Presence,
   } from './policy'
+  import PolicySelect from './PolicySelect.svelte'
 
   let { onconnect }: { onconnect: (peerId: string) => void } = $props()
 
@@ -89,11 +89,7 @@
           <span class="name">{c.name || c.peer_id}</span>
           <span class="code">{c.peer_id}</span>
           {#if c.policy}
-            <select value={policyKey(c.policy)} onchange={(e) => setPolicy(c, e.currentTarget.value)}>
-              {#each policyOptions() as opt (opt.key)}
-                <option value={opt.key}>{opt.label}</option>
-              {/each}
-            </select>
+            <PolicySelect value={policyKey(c.policy)} onchange={(key) => setPolicy(c, key)} />
           {:else}
             <span>{policyLabel(null)}</span>
           {/if}

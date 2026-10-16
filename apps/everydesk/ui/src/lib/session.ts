@@ -256,3 +256,16 @@ export const EVENTS = {
   closed: 'session:closed',
   quality: 'session:quality',
 } as const
+
+/** What a person types after hearing a code, as the backend's `memorable::normalize`: trim,
+ *  lowercase, accents dropped (NFD, combining marks removed), and any run of spaces,
+ *  underscores or dashes becomes one `-` ("Água Lua 42" → "agua-lua-42"). Numeric ids pass. */
+export function normalizeCode(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .split(/[\s_-]+/)
+    .filter((p) => p.length > 0)
+    .map((p) => p.toLowerCase())
+    .join('-')
+}

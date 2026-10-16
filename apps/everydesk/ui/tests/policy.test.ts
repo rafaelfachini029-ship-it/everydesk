@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { remainingSeconds } from '../src/lib/cm.ts'
 import {
   applyPresence,
+  isValidPeriod,
   policyFromKey,
   policyKey,
   policyLabel,
@@ -27,12 +28,19 @@ test('standard options in order', () => {
       'Confirmar a cada 20 min',
       'Confirmar a cada 45 min',
       'Confirmar a cada 80 min',
+      'Outro…',
     ],
   )
   assert.deepEqual(
     policyOptions().map((o) => o.key),
-    ['ask', 'stay', 'r20', 'r45', 'r80'],
+    ['ask', 'stay', 'r20', 'r45', 'r80', 'other'],
   )
+  // A stored custom period is listed so the select can show it; a preset is not repeated.
+  assert.deepEqual(
+    policyOptions({ kind: 'Reconfirm', every_min: 30 }).map((o) => o.key),
+    ['ask', 'stay', 'r20', 'r45', 'r80', 'r30', 'other'],
+  )
+  assert.equal(policyOptions({ kind: 'Reconfirm', every_min: 45 }).length, 6)
 })
 
 test('policy key round-trip and wire shape', () => {
@@ -45,9 +53,16 @@ test('policy key round-trip and wire shape', () => {
   assert.equal(JSON.stringify(policyFromKey('r20')), '{"kind":"Reconfirm","every_min":20}')
   assert.deepEqual(policyFromKey('bogus'), { kind: 'AskAlways' })
   assert.deepEqual(policyFromKey('r0'), { kind: 'AskAlways' })
-  // Only the offered periods exist.
-  assert.deepEqual(policyFromKey('r30'), { kind: 'AskAlways' })
+  // Any whole number of minutes in 1..=1440 ("Outro…").
+  assert.deepEqual(policyFromKey('r1'), { kind: 'Reconfirm', every_min: 1 })
+  assert.deepEqual(policyFromKey('r30'), { kind: 'Reconfirm', every_min: 30 })
   assert.deepEqual(policyFromKey('r45'), { kind: 'Reconfirm', every_min: 45 })
+  assert.deepEqual(policyFromKey('r1440'), { kind: 'Reconfirm', every_min: 1440 })
+  for (const k of ['r1441', 'r9999', 'r01', 'r-5', 'r1.5', 'r', 'other']) {
+    assert.deepEqual(policyFromKey(k), { kind: 'AskAlways' }, k)
+  }
+  assert.ok(isValidPeriod(1) && isValidPeriod(1440))
+  assert.ok(!isValidPeriod(0) && !isValidPeriod(1441) && !isValidPeriod(2.5) && !isValidPeriod(NaN))
 })
 
 test('presence updates only listed ids', () => {

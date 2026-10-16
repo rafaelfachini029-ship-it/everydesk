@@ -54,14 +54,48 @@ pub fn is_valid_code(s: &str) -> bool {
         && !n.starts_with('0')
 }
 
-/// What a person types after hearing a code: trim, lowercase, and any run of spaces,
-/// underscores or dashes becomes a single `-` (`"Azul Tigre 42"` → `"azul-tigre-42"`).
+/// What a person types after hearing a code: trim, lowercase, accents dropped, and any run of
+/// spaces, underscores or dashes becomes a single `-` (`"Água Lua 42"` → `"agua-lua-42"`).
 pub fn normalize(s: &str) -> String {
-    s.split(|c: char| c.is_whitespace() || c == '_' || c == '-')
+    strip_accents(s)
+        .split(|c: char| c.is_whitespace() || c == '_' || c == '-')
         .filter(|p| !p.is_empty())
         .map(str::to_lowercase)
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// NFD then drop combining marks, for the letters a Portuguese keyboard (or phone dictation)
+/// produces: precomposed Latin letters with diacritics map to their base letter, and
+/// combining marks (U+0300..=U+036F, already-decomposed input) are removed. Without a
+/// Unicode-tables dependency; other characters pass through (and fail `is_valid_code`).
+fn strip_accents(s: &str) -> String {
+    s.chars()
+        .filter(|c| !('\u{300}'..='\u{36f}').contains(c))
+        .map(base_letter)
+        .collect()
+}
+
+fn base_letter(c: char) -> char {
+    match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' => 'A',
+        'ç' => 'c',
+        'Ç' => 'C',
+        'è' | 'é' | 'ê' | 'ë' => 'e',
+        'È' | 'É' | 'Ê' | 'Ë' => 'E',
+        'ì' | 'í' | 'î' | 'ï' => 'i',
+        'Ì' | 'Í' | 'Î' | 'Ï' => 'I',
+        'ñ' => 'n',
+        'Ñ' => 'N',
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' => 'O',
+        'ù' | 'ú' | 'û' | 'ü' => 'u',
+        'Ù' | 'Ú' | 'Û' | 'Ü' => 'U',
+        'ý' | 'ÿ' => 'y',
+        'Ý' => 'Y',
+        c => c,
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +130,15 @@ mod tests {
         assert_eq!(normalize("  vela_rio   37 "), "vela-rio-37");
         assert_eq!(normalize("VELA-RIO-37"), "vela-rio-37");
         assert!(is_valid_code(&normalize("Azul Tigre 42")));
+    }
+
+    #[test]
+    fn normalize_strips_accents() {
+        assert_eq!(normalize("Água Lua 42"), "agua-lua-42");
+        assert_eq!(normalize("CORAÇÃO pé 37"), "coracao-pe-37");
+        // Already decomposed (NFD) input: base letter + combining acute.
+        assert_eq!(normalize("A\u{301}gua lua 42"), "agua-lua-42");
+        assert_eq!(normalize("ÍMÃ õ ü ñ"), "ima-o-u-n");
     }
 
     #[test]

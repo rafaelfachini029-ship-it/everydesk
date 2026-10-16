@@ -10,7 +10,46 @@ export const CM_EVENTS = {
   removed: 'cm:removed',
   pairOffer: 'cm:pair_offer',
   reconfirm: 'cm:reconfirm',
+  identity: 'cm:identity',
 } as const
+
+export type IdentityState = 'verified' | 'unverified' | 'key_changed'
+
+/** `cm:identity`: who is asking for the pending prompt `conn_id`. */
+export interface Identity {
+  conn_id: number
+  state: IdentityState
+  /** The claimed id is in one of the books (host pairings or contacts). */
+  known: boolean
+}
+
+export interface IdentityNotice {
+  /** 'loud': someone claims a known id without its key; 'info': just unverified. */
+  level: 'loud' | 'info'
+  text: string
+}
+
+/** What the card says about the identity; `null` for a verified one. No identity yet counts
+ *  as unverified (the claim is all we have). */
+export function identityNotice(id: Identity | undefined, name: string): IdentityNotice | null {
+  const state = id?.state ?? 'unverified'
+  if (state === 'verified') return null
+  if (id?.known || state === 'key_changed') {
+    return { level: 'loud', text: `Atenção: alguém diz ser ${name}, mas a chave não confere` }
+  }
+  return { level: 'info', text: 'Identidade não verificada' }
+}
+
+/** "Lembrar este contato" exists only for a pair offer whose identity is not unverified. */
+export function canRemember(id: Identity | undefined, offer: PairOffer | undefined): boolean {
+  return !!offer && !!id && id.state !== 'unverified'
+}
+
+/** Spec 4.4: accepting a verified offer pairs by default (policy "Sempre perguntar"); a key
+ *  change never defaults to remembering. */
+export function rememberByDefault(offer: PairOffer): boolean {
+  return !offer.key_changed
+}
 
 export interface Incoming {
   conn_id: number
@@ -54,6 +93,7 @@ export interface CmSnapshot {
   pending: PendingSnapshot[]
   connected: Connected[]
   offers: PairOffer[]
+  identities: Identity[]
   reconfirms: ReconfirmSnapshot[]
 }
 

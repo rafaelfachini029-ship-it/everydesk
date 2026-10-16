@@ -2,21 +2,28 @@
   // Accessed side: accept/deny prompts (60 s, then the engine closes the connection with
   // "Pedido não respondido em 60 s") and a "Conectado" indicator while a session is authorized.
   // A prompt with a `cm:pair_offer` can also remember the controller under a policy; an
-  // authorized session may get a `cm:reconfirm` ring (ReconfirmCard).
+  // authorized session may get a `cm:reconfirm` ring (ReconfirmCard). `cm:identity` says
+  // whether the claimed id/name is backed by a verified key; "lembrar" is never offered for
+  // an unverified one, and a known id without its key gets a loud warning.
   import { invoke } from '@tauri-apps/api/core'
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
   import { onMount } from 'svelte'
   import {
     CM_EVENTS,
+    canRemember,
+    identityNotice,
     remainingSeconds,
+    rememberByDefault,
     type CmSnapshot,
     type Connected,
+    type Identity,
     type Incoming,
     type PairOffer,
     type Reconfirm,
     type Removed,
   } from './cm'
-  import { policyFromKey, policyOptions } from './policy'
+  import { policyFromKey } from './policy'
+  import PolicySelect from './PolicySelect.svelte'
   import ReconfirmCard from './ReconfirmCard.svelte'
 
   type Pending = Incoming & { start: number }
@@ -27,6 +34,10 @@
   let pending = $state<Pending[]>([])
   let connected = $state<Connected[]>([])
   let offers = $state<Record<number, PairOffer>>({})
+  let identities = $state<Record<number, Identity>>({})
+  /** Per-prompt error of a failed accept (the card stays up). */
+  let errors = $state<Record<number, string>>({})
+  let busy = $state<Record<number, boolean>>({})
   let remember = $state<Record<number, Remember>>({})
   let rings = $state<Ring[]>([])
   let now = $state(Date.now())
@@ -34,15 +45,25 @@
   function addOffer(o: PairOffer) {
     offers = { ...offers, [o.conn_id]: o }
     if (!remember[o.conn_id]) {
-      remember = { ...remember, [o.conn_id]: { on: false, policy: 'ask', replaceKey: false } }
+      // Spec 4.4: accepting a verified offer pairs by default, policy "Sempre perguntar".
+      remember = {
+        ...remember,
+        [o.conn_id]: { on: rememberByDefault(o), policy: 'ask', replaceKey: false },
+      }
     }
   }
 
   function forget(connId: number) {
     const { [connId]: _o, ...o } = offers
     const { [connId]: _r, ...r } = remember
+    const { [connId]: _i, ...i } = identities
+    const { [connId]: _e, ...e } = errors
+    const { [connId]: _b, ...b } = busy
     offers = o
     remember = r
+    identities = i
+    errors = e
+    busy = b
   }
 
   function drop(connId: number) {
@@ -53,19 +74,29 @@
   }
 
   async function accept(p: Pending) {
-    pending = pending.filter((x) => x.conn_id !== p.conn_id)
-    const r = offers[p.conn_id] ? remember[p.conn_id] : undefined
-    forget(p.conn_id)
-    if (r?.on) {
-      await invoke('cm_pair_ack', {
-        connId: p.conn_id,
-        accepted: true,
-        policy: policyFromKey(r.policy),
-        replaceKey: r.replaceKey,
-      })
-    } else {
-      await invoke('cm_authorize', { connId: p.conn_id })
+    if (busy[p.conn_id]) return
+    const r = canRemember(identities[p.conn_id], offers[p.conn_id]) ? remember[p.conn_id] : undefined
+    busy = { ...busy, [p.conn_id]: true }
+    errors = { ...errors, [p.conn_id]: '' }
+    try {
+      if (r?.on) {
+        await invoke('cm_pair_ack', {
+          connId: p.conn_id,
+          accepted: true,
+          policy: policyFromKey(r.policy),
+          replaceKey: r.replaceKey,
+        })
+      } else {
+        await invoke('cm_authorize', { connId: p.conn_id })
+      }
+    } catch (e) {
+      // Keep the card: the owner can fix the choice (or untick "lembrar") and accept again.
+      busy = { ...busy, [p.conn_id]: false }
+      errors = { ...errors, [p.conn_id]: `Não foi possível aceitar: ${e}` }
+      return
     }
+    pending = pending.filter((x) => x.conn_id !== p.conn_id)
+    forget(p.conn_id)
     // `authorize` does not echo `cm:connected`; a vanished connection still sends `cm:removed`.
     if (!connected.some((c) => c.conn_id === p.conn_id)) {
       connected = [...connected, { conn_id: p.conn_id, peer_id: p.peer_id, name: p.name }]
@@ -100,6 +131,9 @@
       }),
       listen<Removed>(CM_EVENTS.removed, (e) => drop(e.payload.conn_id)),
       listen<PairOffer>(CM_EVENTS.pairOffer, (e) => addOffer(e.payload)),
+      listen<Identity>(CM_EVENTS.identity, (e) => {
+        identities = { ...identities, [e.payload.conn_id]: e.payload }
+      }),
       listen<Reconfirm>(CM_EVENTS.reconfirm, (e) => {
         const r = e.payload
         rings = [...rings.filter((x) => x.conn_id !== r.conn_id), { ...r, start: Date.now() }]
@@ -119,6 +153,9 @@
           if (!connected.some((x) => x.conn_id === c.conn_id)) connected = [...connected, c]
         }
         for (const o of snap.offers) if (!offers[o.conn_id]) addOffer(o)
+        for (const i of snap.identities) {
+          if (!identities[i.conn_id]) identities = { ...identities, [i.conn_id]: i }
+        }
         for (const { age_ms, ...r } of snap.reconfirms) {
           if (!rings.some((x) => x.conn_id === r.conn_id)) rings = [...rings, { ...r, start: t - age_ms }]
         }
@@ -154,11 +191,15 @@
     />
   {/each}
   {#each pending as p (p.conn_id)}
+    {@const notice = identityNotice(identities[p.conn_id], p.name || p.peer_id)}
     <div class="card">
       <strong>Pedido de acesso{p.is_file_transfer ? ' (arquivos)' : ''}</strong>
       <div>ID: {p.peer_id}</div>
       <div>Nome: {p.name}</div>
-      {#if offers[p.conn_id] && remember[p.conn_id]}
+      {#if notice}
+        <p class={notice.level === 'loud' ? 'warn loud' : 'unverified'}>{notice.text}</p>
+      {/if}
+      {#if canRemember(identities[p.conn_id], offers[p.conn_id]) && remember[p.conn_id]}
         {@const o = offers[p.conn_id]}
         {#if o.key_changed}
           <p class="warn">A chave desta máquina mudou. Só marque "lembrar" se tiver certeza.</p>
@@ -168,11 +209,10 @@
           Lembrar este contato
         </label>
         {#if remember[p.conn_id].on}
-          <select bind:value={remember[p.conn_id].policy}>
-            {#each policyOptions() as opt (opt.key)}
-              <option value={opt.key}>{opt.label}</option>
-            {/each}
-          </select>
+          <PolicySelect
+            value={remember[p.conn_id].policy}
+            onchange={(key) => (remember[p.conn_id].policy = key)}
+          />
           {#if o.key_changed}
             <label>
               <input type="checkbox" bind:checked={remember[p.conn_id].replaceKey} />
@@ -181,8 +221,9 @@
           {/if}
         {/if}
       {/if}
+      {#if errors[p.conn_id]}<p class="warn">{errors[p.conn_id]}</p>{/if}
       <div class="actions">
-        <button onclick={() => accept(p)}>Aceitar</button>
+        <button onclick={() => accept(p)} disabled={busy[p.conn_id]}>Aceitar</button>
         <button onclick={() => close(p.conn_id)}>Recusar</button>
         <span class="count">{remainingSeconds(p.start, now)} s</span>
       </div>
@@ -230,6 +271,15 @@
   }
   .warn {
     color: #b00;
+    margin: 4px 0;
+  }
+  .loud {
+    font-weight: bold;
+    border: 2px solid #b00;
+    padding: 4px;
+  }
+  .unverified {
+    color: #8a5a00;
     margin: 4px 0;
   }
 </style>

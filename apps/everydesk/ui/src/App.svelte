@@ -4,7 +4,7 @@
   import Contacts from './lib/Contacts.svelte'
   import IncomingCard from './lib/IncomingCard.svelte'
   import RemoteCanvas from './lib/RemoteCanvas.svelte'
-  import type { MsgBox } from './lib/session'
+  import { normalizeCode, type MsgBox } from './lib/session'
 
   let myId = $state('...')
   let status = $state('...')
@@ -30,7 +30,7 @@
 
   function connect(e: SubmitEvent) {
     e.preventDefault()
-    const id = peerId.trim()
+    const id = normalizeCode(peerId)
     if (!id) return
     lastError = ''
     remote = { peerId: id, password }

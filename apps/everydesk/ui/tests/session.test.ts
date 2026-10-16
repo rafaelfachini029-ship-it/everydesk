@@ -79,3 +79,13 @@ test('accumulateWheel: trackpad bursts become ~1 step per 100 px', async () => {
   assert.deepEqual(accumulateWheel({ x: 0, y: 0 }, -120, 0), { x: 1, y: 0 })
   assert.deepEqual(accumulateWheel({ x: 0, y: 0 }, 0, 4), { x: 0, y: 0 })
 })
+
+test('normalizeCode mirrors memorable::normalize', async () => {
+  const { normalizeCode } = await import('../src/lib/session.ts')
+  assert.equal(normalizeCode('Água Lua 42'), 'agua-lua-42')
+  assert.equal(normalizeCode('  vela_rio   37 '), 'vela-rio-37')
+  assert.equal(normalizeCode('VELA-RIO-37'), 'vela-rio-37')
+  assert.equal(normalizeCode('CORAÇÃO pé 37'), 'coracao-pe-37')
+  assert.equal(normalizeCode(' 259402742 '), '259402742')
+  assert.equal(normalizeCode('   '), '')
+})
