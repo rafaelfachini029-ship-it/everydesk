@@ -7,7 +7,8 @@ publish = false
 
 [lib]
 name = "everydesk_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# rlib only: each extra crate type is another full-engine (LTO) link.
+crate-type = ["rlib"]
 
 [[bin]]
 name = "everydesk"
