@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    everydesk_lib::run();
+    everydesk_lib::main();
 }

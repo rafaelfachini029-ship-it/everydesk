@@ -119,6 +119,9 @@ pub const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
 pub const LOGIN_MSG_OFFLINE: &str = "Offline";
 /// EveryDesk: the click-approve prompt went unanswered (`CLICK_APPROVE_TIMEOUT_SECS`).
 pub const LOGIN_MSG_TIMEOUT: &str = "Pedido não respondido em 60 s";
+/// EveryDesk: the host could not reach its in-app connection manager (`_cm`), so the login
+/// is refused rather than let through without the accept prompt.
+pub const LOGIN_MSG_CM_UNAVAILABLE: &str = "Aguardando o aplicativo EveryDesk";
 pub const LOGIN_SCREEN_WAYLAND: &str = "Wayland login screen is not supported";
 #[cfg(target_os = "linux")]
 pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "ubuntu-21-04-required";

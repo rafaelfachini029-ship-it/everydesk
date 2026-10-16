@@ -193,12 +193,20 @@ impl InvokeUiCM for TauriCM {
     fn file_transfer_log(&self, _action: &str, _log: &str) {}
 }
 
-/// Accept prompts by click unless the user already chose a mode (`password::approve_mode`
-/// reads `approve-mode`: `click` | `password` | anything else = click+password).
-pub fn default_approve_mode() {
-    if Config::get_option("approve-mode").is_empty() {
+/// EveryDesk always asks: every login waits for the in-app accept prompt. Forced at each start
+/// because the config is shared with a stock RustDesk install (same `APP_NAME`), where
+/// `password` or both (`password::approve_mode`: anything but `click`/`password`) would let a
+/// password login in without a prompt.
+pub fn force_click_approve_mode() {
+    let cur = Config::get_option("approve-mode");
+    if needs_click_override(&cur) {
+        log::info!("everydesk: approve-mode {cur:?} -> \"click\"");
         Config::set_option("approve-mode".to_owned(), "click".to_owned());
     }
+}
+
+fn needs_click_override(current: &str) -> bool {
+    current != "click"
 }
 
 /// Serves the `_cm` IPC on its own thread (`start_ipc` blocks on a tokio runtime). Must run
@@ -240,6 +248,14 @@ pub fn cm_close(conn_id: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approve_mode_is_forced_to_click() {
+        for m in ["", "password", "password-click", "both"] {
+            assert!(needs_click_override(m), "{m:?} must be overridden");
+        }
+        assert!(!needs_click_override("click"));
+    }
 
     #[test]
     fn unauthorized_client_is_an_incoming_prompt() {

@@ -32,10 +32,46 @@ fn get_server_status() -> String {
     s.to_owned()
 }
 
-pub fn run() {
-    hbb_common::init_log(false, "everydesk");
+/// `core_main` returns `None` when it handled a command-line mode itself (`--server`,
+/// `--check-hwcodec-config`, `--get-id`, `--password`, `--option`, ...), and `Some(args)` for
+/// what is left to the UI. Only a plain launch opens the EveryDesk window; leftover args
+/// (e.g. `--cm`, which this app never needs: it serves `_cm` itself) exit instead.
+fn should_start_gui(core_main_result: Option<&[String]>) -> bool {
+    matches!(core_main_result, Some(args) if args.is_empty())
+}
+
+/// Process entry point. The host spawns this same exe with engine modes (hwcodec probe,
+/// service, CLI settings); those must run headless, never as a second app window.
+pub fn main() {
+    // Same per-mode log directory core_main would pick, except a plain launch logs under
+    // `everydesk`; initialized here so the config fixes below are logged too.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    hbb_common::init_log(false, &log_name(&args));
+    // Pinned server and click approval first: every mode below may register or take logins.
     server::apply_server_config();
-    cm::default_approve_mode();
+    cm::force_click_approve_mode();
+    let res = librustdesk::core_main::core_main();
+    if should_start_gui(res.as_deref()) {
+        run();
+    } else if let Some(args) = res {
+        log::warn!("everydesk: unsupported arguments, exiting: {args:?}");
+    }
+}
+
+fn log_name(args: &[String]) -> String {
+    if args
+        .iter()
+        .any(|a| a.starts_with("--portable-service-shmem-name="))
+    {
+        return "portable-service".to_owned();
+    }
+    match args.first().map(|a| a.trim_start_matches("--")) {
+        Some(name) if !name.is_empty() && args[0].starts_with("--") => name.to_owned(),
+        _ => "everydesk".to_owned(),
+    }
+}
+
+fn run() {
     log::info!(
         "everydesk: server={} id={}",
         server::EVERYDESK_SERVER,
@@ -77,4 +113,32 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{log_name, should_start_gui};
+
+    #[test]
+    fn log_dir_per_mode() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(log_name(&v(&[])), "everydesk");
+        let hw = v(&["--check-hwcodec-config"]);
+        assert_eq!(log_name(&hw), "check-hwcodec-config");
+        assert_eq!(log_name(&v(&["--server"])), "server");
+        assert_eq!(log_name(&v(&["--"])), "everydesk");
+        let ps = v(&["x", "--portable-service-shmem-name=a"]);
+        assert_eq!(log_name(&ps), "portable-service");
+    }
+
+    #[test]
+    fn gui_only_for_a_plain_launch() {
+        assert!(should_start_gui(Some(&[])));
+        // Handled by core_main (e.g. --check-hwcodec-config, --get-id, --server).
+        assert!(!should_start_gui(None));
+        // Left over by core_main: no second app window.
+        assert!(!should_start_gui(Some(&["--cm".to_owned()])));
+        let unknown = ["--unknown".to_owned(), "x".to_owned()];
+        assert!(!should_start_gui(Some(&unknown)));
+    }
 }

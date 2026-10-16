@@ -202,7 +202,12 @@ pub fn core_main() -> Option<Vec<String>> {
             crate::platform::try_remove_temp_update_files();
             hbb_common::config::PeerConfig::preload_peers();
         }
+        // EveryDesk: the Tauri app starts the host itself, after its `_cm` is listening, so
+        // the first login finds the accept prompt.
+        #[cfg(not(feature = "everydesk"))]
         std::thread::spawn(move || crate::start_server(false, no_server));
+        #[cfg(feature = "everydesk")]
+        let _ = no_server;
     } else {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         // Root CLI management commands must talk to the user `--server` main IPC.

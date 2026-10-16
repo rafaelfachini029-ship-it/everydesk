@@ -809,6 +809,13 @@ impl Connection {
                         }
                         ipc::Data::CmErr(e) => {
                             if e != "expected" {
+                                // EveryDesk: no `_cm` means no accept prompt; refuse the login
+                                // explicitly instead of leaving it to the approve deadline.
+                                #[cfg(feature = "everydesk")]
+                                if !conn.authorized {
+                                    conn.send_login_error(crate::client::LOGIN_MSG_CM_UNAVAILABLE)
+                                        .await;
+                                }
                                 // cm closed before connection
                                 conn.on_close(&format!("connection manager error: {}", e), false).await;
                                 break;
@@ -2847,12 +2854,16 @@ impl Connection {
     fn try_start_cm_ipc(&mut self) {
         if let Some(p) = self.start_cm_ipc_para.take() {
             tokio::spawn(async move {
-                #[cfg(windows)]
+                #[cfg(any(windows, feature = "everydesk"))]
                 let tx_from_cm_clone = p.tx_from_cm.clone();
                 if let Err(err) = start_ipc(p.rx_to_cm, p.tx_from_cm).await {
                     log::warn!("ipc to connection manager exit: {}", err);
+                    // EveryDesk: the app's `_cm` is the only accept prompt. Without it the
+                    // connection must end (login refused), never go on unprompted.
+                    #[cfg(feature = "everydesk")]
+                    allow_err!(tx_from_cm_clone.send(Data::CmErr(err.to_string())));
                     // https://github.com/rustdesk/rustdesk-server-pro/discussions/382#discussioncomment-10525725, cm may start failed
-                    #[cfg(windows)]
+                    #[cfg(all(windows, not(feature = "everydesk")))]
                     if !crate::platform::is_prelogin()
                         && !err.to_string().contains(crate::platform::EXPLORER_EXE)
                         && !crate::hbbs_http::sync::is_pro()
@@ -7178,6 +7189,15 @@ mod test {
         assert_eq!(click_approve_deadline_at(t) - t, Duration::from_secs(60));
         assert!(Duration::from_secs(CLICK_APPROVE_TIMEOUT_SECS) < LOGIN_GRACE);
         assert_eq!(crate::client::LOGIN_MSG_TIMEOUT, "Pedido não respondido em 60 s");
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn test_cm_unavailable_login_msg() {
+        assert_eq!(
+            crate::client::LOGIN_MSG_CM_UNAVAILABLE,
+            "Aguardando o aplicativo EveryDesk"
+        );
     }
 
     #[test]
