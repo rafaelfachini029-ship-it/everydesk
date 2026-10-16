@@ -122,6 +122,12 @@ pub const LOGIN_MSG_TIMEOUT: &str = "Pedido não respondido em 60 s";
 /// EveryDesk: the host could not reach its in-app connection manager (`_cm`), so the login
 /// is refused rather than let through without the accept prompt.
 pub const LOGIN_MSG_CM_UNAVAILABLE: &str = "Aguardando o aplicativo EveryDesk";
+/// EveryDesk: the owner denied a periodic reconfirmation, or revoked the pairing.
+#[cfg(feature = "everydesk")]
+pub const LOGIN_MSG_RECONFIRM_DENIED: &str = "Conexão encerrada pelo dono da máquina";
+/// EveryDesk: a periodic reconfirmation went unanswered for `RECONFIRM_RING_SECS`.
+#[cfg(feature = "everydesk")]
+pub const LOGIN_MSG_RECONFIRM_TIMEOUT: &str = "Reconfirmação não respondida em 60 s";
 pub const LOGIN_SCREEN_WAYLAND: &str = "Wayland login screen is not supported";
 #[cfg(target_os = "linux")]
 pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "ubuntu-21-04-required";
@@ -5222,6 +5228,12 @@ lazy_static::lazy_static! {
 /// * `text` - The text of the message.
 #[inline]
 pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
+    // EveryDesk: the owner ended the session on purpose; a retry would reconnect a contact
+    // whose policy needs no prompt, undoing the owner's decision.
+    #[cfg(feature = "everydesk")]
+    if text == LOGIN_MSG_RECONFIRM_DENIED || text == LOGIN_MSG_RECONFIRM_TIMEOUT {
+        return false;
+    }
     msgtype == "error"
         && title == "Connection Error"
         && ((text.contains("10054") || text.contains("104")) && retry_for_relay
@@ -5244,6 +5256,26 @@ pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: b
 #[cfg(test)]
 mod retry_tests {
     use super::check_if_retry;
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn reconfirm_close_reasons_are_not_retryable() {
+        for text in [
+            super::LOGIN_MSG_RECONFIRM_DENIED,
+            super::LOGIN_MSG_RECONFIRM_TIMEOUT,
+        ] {
+            assert!(!check_if_retry("error", "Connection Error", text, false));
+            assert!(!check_if_retry("error", "Connection Error", text, true));
+        }
+        assert_eq!(
+            super::LOGIN_MSG_RECONFIRM_DENIED,
+            "Conexão encerrada pelo dono da máquina"
+        );
+        assert_eq!(
+            super::LOGIN_MSG_RECONFIRM_TIMEOUT,
+            "Reconfirmação não respondida em 60 s"
+        );
+    }
 
     #[test]
     fn incoming_only_error_is_not_retryable() {

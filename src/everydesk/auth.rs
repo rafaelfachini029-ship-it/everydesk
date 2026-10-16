@@ -183,8 +183,7 @@ mod tests {
             });
             let none = capture_host_keys(async {});
             let bad = capture_host_keys(async { record_host_keys(&[1u8; 31], &[2u8; 32]) });
-            let ((_, a), (_, b), (_, none), (_, bad)) =
-                hbb_common::tokio::join!(a, b, none, bad);
+            let ((_, a), (_, b), (_, none), (_, bad)) = hbb_common::tokio::join!(a, b, none, bad);
             assert_eq!(
                 a,
                 Some(HostKeys {

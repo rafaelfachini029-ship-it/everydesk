@@ -1524,6 +1524,62 @@ impl<T: InvokeUiSession> Remote<T> {
         return false;
     }
 
+    /// EveryDesk: the host accepted and remembered us (record it in our own book, used for the
+    /// contacts list only, keyed to the host key this session's handshake proved), or revoked
+    /// our pairing (forget it).
+    #[cfg(feature = "everydesk")]
+    fn handle_everydesk(&mut self, m: EveryDeskMsg) {
+        use crate::everydesk::pairings::{book, Pairing, Policy};
+        let (peer_id, host, name) = {
+            let lc = self.handler.lc.read().unwrap();
+            let name = lc
+                .peer_info
+                .as_ref()
+                .map(|pi| pi.hostname.clone())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| lc.id.clone());
+            (lc.id.clone(), lc.everydesk_host, name)
+        };
+        let mut book = book().lock().unwrap();
+        match m.union {
+            Some(every_desk_msg::Union::PairAck(ack)) if ack.accepted => {
+                // Only a host whose identity this session verified, and only once we signed.
+                let Some(host) = host else {
+                    log::warn!("everydesk: pair ack from unverified host {}, ignored", peer_id);
+                    return;
+                };
+                let existing = book.get(&peer_id).cloned();
+                let created_at = existing.as_ref().map(|p| p.created_at).unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or_default()
+                });
+                book.upsert(Pairing {
+                    peer_id: peer_id.clone(),
+                    pk: host.sign_pk,
+                    name,
+                    avatar: existing.and_then(|p| p.avatar),
+                    // Placeholder: the controller's book only lists contacts.
+                    policy: Policy::AskAlways,
+                    created_at,
+                });
+                log::info!("everydesk: {} remembered us", peer_id);
+            }
+            Some(every_desk_msg::Union::Revoke(_)) => {
+                if book.get(&peer_id).is_none() {
+                    return;
+                }
+                book.remove(&peer_id);
+                log::info!("everydesk: {} revoked our pairing", peer_id);
+            }
+            _ => return,
+        }
+        if let Err(e) = book.save() {
+            log::error!("pairings: cannot save {}: {}", peer_id, e);
+        }
+    }
+
     async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream) -> bool {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
@@ -2033,6 +2089,10 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
                 Some(message::Union::Misc(misc)) => match misc.union {
+                    #[cfg(feature = "everydesk")]
+                    Some(misc::Union::Everydesk(m)) => {
+                        self.handle_everydesk(m);
+                    }
                     Some(misc::Union::AudioFormat(f)) => {
                         self.audio_sender.send(MediaData::AudioFormat(f)).ok();
                     }

@@ -198,6 +198,17 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
     fn update_voice_call_state(&self, client: &Client);
 
     fn file_transfer_log(&self, action: &str, log: &str);
+
+    /// EveryDesk: show the periodic reconfirmation ring for `conn_id` (answer with
+    /// `reconfirm_result`). The session keeps streaming meanwhile.
+    #[cfg(feature = "everydesk")]
+    fn reconfirm(&self, _conn_id: i32, _ring_secs: u32) {}
+
+    /// EveryDesk: the pending login `conn_id` comes from an authenticated controller that can
+    /// be remembered; the accept card may offer "Aceitar e lembrar" (answer with `pair_ack`).
+    #[cfg(feature = "everydesk")]
+    fn pair_offer(&self, _conn_id: i32, _peer_id: String, _name: String, _avatar: Option<Vec<u8>>) {
+    }
 }
 
 impl<T: InvokeUiCM> Deref for ConnectionManager<T> {
@@ -377,6 +388,48 @@ pub fn close(id: i32) {
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
         allow_err!(client.tx.send(Data::Close));
     };
+}
+
+/// EveryDesk: the owner's answer to a reconfirmation ring.
+#[cfg(feature = "everydesk")]
+pub fn reconfirm_result(id: i32, ok: bool) {
+    if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+        allow_err!(client.tx.send(Data::ReconfirmResult { conn_id: id, ok }));
+    };
+}
+
+/// EveryDesk: accept the pending login `id`; with `accepted`, also remember the controller
+/// under `policy`. Deny with `close`.
+#[cfg(feature = "everydesk")]
+pub fn pair_ack(id: i32, accepted: bool, policy: Option<crate::everydesk::pairings::Policy>) {
+    if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
+        client.authorized = true;
+        allow_err!(client.tx.send(Data::PairAck {
+            conn_id: id,
+            accepted,
+            policy,
+        }));
+    };
+}
+
+/// EveryDesk: forget `peer_id`'s pairing (it needs the code and an accept again) and end any
+/// session it has open here.
+#[cfg(feature = "everydesk")]
+pub fn revoke(peer_id: &str) {
+    {
+        let mut book = crate::everydesk::pairings::book().lock().unwrap();
+        book.remove(peer_id);
+        if let Err(e) = book.save() {
+            log::error!("pairings: cannot save after revoking {}: {}", peer_id, e);
+        }
+    }
+    for client in CLIENTS.read().unwrap().values() {
+        if client.peer_id == peer_id {
+            allow_err!(client.tx.send(Data::Revoke {
+                peer_id: peer_id.to_owned(),
+            }));
+        }
+    }
 }
 
 /// Like `close`, but says the CM's WINDOW closed rather than a person disconnecting this peer.
@@ -583,6 +636,15 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
+                                }
+                                #[cfg(feature = "everydesk")]
+                                // This IPC stream belongs to `self.conn_id`; the field is informative.
+                                Data::Reconfirm { conn_id: _, ring_secs } => {
+                                    self.cm.reconfirm(self.conn_id, ring_secs);
+                                }
+                                #[cfg(feature = "everydesk")]
+                                Data::PairOffer { conn_id: _, peer_id, name, avatar } => {
+                                    self.cm.pair_offer(self.conn_id, peer_id, name, avatar);
                                 }
                                 Data::SwitchPermission { name, enabled } => {
                                     // Keep this branch scoped to privacy mode rollback.

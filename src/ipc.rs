@@ -408,6 +408,32 @@ pub enum Data {
     #[cfg(windows)]
     ControlledSessionCount(usize),
     CmErr(String),
+    /// EveryDesk, connection -> CM: show the periodic reconfirmation ring for this session.
+    #[cfg(feature = "everydesk")]
+    Reconfirm { conn_id: i32, ring_secs: u32 },
+    /// EveryDesk, CM -> connection: the owner's answer to `Reconfirm`.
+    #[cfg(feature = "everydesk")]
+    ReconfirmResult { conn_id: i32, ok: bool },
+    /// EveryDesk, connection -> CM: the pending login comes from an authenticated controller
+    /// that can be remembered ("Aceitar e lembrar"). Sent right after the `Login` prompt.
+    #[cfg(feature = "everydesk")]
+    PairOffer {
+        conn_id: i32,
+        peer_id: String,
+        name: String,
+        avatar: Option<Vec<u8>>,
+    },
+    /// EveryDesk, CM -> connection: accept the pending login; with `accepted` also remember
+    /// the controller under `policy` (deny is `Close`).
+    #[cfg(feature = "everydesk")]
+    PairAck {
+        conn_id: i32,
+        accepted: bool,
+        policy: Option<crate::everydesk::pairings::Policy>,
+    },
+    /// EveryDesk, CM -> connection: the owner revoked this peer's pairing; end its session.
+    #[cfg(feature = "everydesk")]
+    Revoke { peer_id: String },
     // CM-side file reading responses (Windows only)
     // These are sent from CM back to Connection when CM handles file reading
     /// Response to ReadFile: contains initial file list or error
