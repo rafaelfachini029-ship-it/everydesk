@@ -27,7 +27,12 @@ fn main() {
         winapi::um::shellscalingapi::SetProcessDpiAwareness(2);
     }
     if let Some(args) = crate::core_main::core_main().as_mut() {
+        #[cfg(not(feature = "everydesk"))]
         ui::start(args);
+        // EveryDesk: no Sciter UI; the GUI is the Tauri app. Service/server
+        // modes are handled inside core_main() and never reach here.
+        #[cfg(feature = "everydesk")]
+        let _ = args;
     }
     common::global_clean();
 }

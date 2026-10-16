@@ -34,7 +34,8 @@ pub trait FileManager: Interface {
     #[cfg(not(any(
         target_os = "android",
         target_os = "ios",
-        feature = "flutter"
+        feature = "flutter",
+        feature = "everydesk"
     )))]
     fn read_dir(&self, path: String, include_hidden: bool) -> sciter::Value {
         match fs::read_dir(&fs::get_path(&path), include_hidden) {

@@ -1,3 +1,6 @@
+// EveryDesk: without the Sciter/Flutter UIs, the session/client code they drive has no in-crate
+// caller (the Tauri app in apps/everydesk is the consumer), so dead_code would flood the build.
+#![cfg_attr(feature = "everydesk", allow(dead_code))]
 #[cfg(any(test, not(target_os = "linux")))]
 mod audio_resampler;
 mod keyboard;
@@ -26,7 +29,8 @@ pub mod ipc;
 #[cfg(not(any(
     target_os = "android",
     target_os = "ios",
-    feature = "flutter"
+    feature = "flutter",
+    feature = "everydesk"
 )))]
 pub mod ui;
 mod version;
