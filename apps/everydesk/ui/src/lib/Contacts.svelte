@@ -18,6 +18,13 @@
 
   let contacts = $state<Contact[]>([])
   let error = $state('')
+  let listEl: HTMLElement | undefined = $state()
+
+  /** Periodic reload: skipped while a control in the list has focus (an open select). */
+  async function poll() {
+    if (listEl && listEl.contains(document.activeElement)) return
+    await load()
+  }
 
   async function load() {
     try {
@@ -51,7 +58,7 @@
   onMount(() => {
     load()
     // The book changes when a prompt is accepted with "lembrar" or a host remembers us.
-    const t = setInterval(load, 5000)
+    const t = setInterval(poll, 5000)
     const un = listen<Presence[]>('contacts:presence', (e) => {
       contacts = applyPresence(contacts, e.payload)
     })
@@ -70,7 +77,7 @@
   })
 </script>
 
-<section class="contacts">
+<section class="contacts" bind:this={listEl}>
   <h2>Contatos</h2>
   {#if contacts.length === 0}
     <p>Nenhum contato ainda.</p>
@@ -83,7 +90,7 @@
           <span class="code">{c.peer_id}</span>
           {#if c.policy}
             <select value={policyKey(c.policy)} onchange={(e) => setPolicy(c, e.currentTarget.value)}>
-              {#each policyOptions(c.policy) as opt (opt.key)}
+              {#each policyOptions() as opt (opt.key)}
                 <option value={opt.key}>{opt.label}</option>
               {/each}
             </select>

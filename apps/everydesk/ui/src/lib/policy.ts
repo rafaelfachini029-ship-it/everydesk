@@ -34,11 +34,13 @@ export function policyKey(p: Policy): string {
   }
 }
 
-/** Inverse of `policyKey`; anything unknown is AskAlways (the safe default). */
+/** Inverse of `policyKey` for the offered set (r20/r45/r80 only); anything else is
+ *  AskAlways (the safe default; the backend also rejects other periods). */
 export function policyFromKey(key: string): Policy {
   if (key === 'stay') return { kind: 'StayConnected' }
-  const m = /^r(\d+)$/.exec(key)
-  if (m && Number(m[1]) > 0) return { kind: 'Reconfirm', every_min: Number(m[1]) }
+  for (const every_min of RECONFIRM_CHOICES_MIN) {
+    if (key === `r${every_min}`) return { kind: 'Reconfirm', every_min }
+  }
   return { kind: 'AskAlways' }
 }
 
@@ -54,14 +56,13 @@ export function policyLabel(p: Policy | null): string {
   }
 }
 
-/** Selector options; a stored non-standard Reconfirm period is kept as an extra option. */
-export function policyOptions(current?: Policy | null): { key: string; label: string }[] {
+/** The fixed selector options. */
+export function policyOptions(): { key: string; label: string }[] {
   const list: Policy[] = [
     { kind: 'AskAlways' },
     { kind: 'StayConnected' },
     ...RECONFIRM_CHOICES_MIN.map((every_min) => ({ kind: 'Reconfirm' as const, every_min })),
   ]
-  if (current && !list.some((p) => policyKey(p) === policyKey(current))) list.push(current)
   return list.map((p) => ({ key: policyKey(p), label: policyLabel(p) }))
 }
 

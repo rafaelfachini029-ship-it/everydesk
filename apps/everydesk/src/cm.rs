@@ -10,6 +10,7 @@
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
 use crate::contacts::PolicyView;
+use librustdesk::everydesk::pairings::Policy;
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 use tauri::{AppHandle, Emitter};
@@ -342,7 +343,8 @@ pub fn cm_reconfirm_result(conn_id: i32, ok: bool) {
 }
 
 /// Accepts the pending prompt `conn_id` (like `cm_authorize`); with `accepted`, also
-/// remembers the controller under `policy` (`null` = AskAlways). `replace_key` (default
+/// remembers the controller under `policy` (`null` = AskAlways; a Reconfirm period other
+/// than 20/45/80 min is rejected before anything reaches the engine). `replace_key` (default
 /// false) is the explicit "Substituir chave guardada" answer for a `key_changed` offer:
 /// without it the engine keeps the key already pinned.
 #[tauri::command]
@@ -351,11 +353,13 @@ pub fn cm_pair_ack(
     accepted: bool,
     policy: Option<PolicyView>,
     replace_key: Option<bool>,
-) {
+) -> Result<(), String> {
+    let policy = policy.map(Policy::try_from).transpose()?;
     let replace_key = replace_key.unwrap_or(false);
     log::info!("everydesk: pair ack #{conn_id} accepted={accepted} policy={policy:?} replace_key={replace_key}");
-    ui_cm_interface::pair_ack(conn_id, accepted, policy.map(Into::into), replace_key);
+    ui_cm_interface::pair_ack(conn_id, accepted, policy, replace_key);
     with_state(|s| s.authorize(conn_id));
+    Ok(())
 }
 
 #[tauri::command]

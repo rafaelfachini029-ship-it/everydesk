@@ -137,6 +137,13 @@ impl Book {
             _ => Policy::AskAlways,
         }
     }
+
+    /// Every pairing, sorted by peer id (stable output for the contacts list).
+    pub fn list(&self) -> Vec<&Pairing> {
+        let mut list: Vec<&Pairing> = self.pairings.values().collect();
+        list.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        list
+    }
 }
 
 const FILE_NAME: &str = "pairings.json";
@@ -353,6 +360,22 @@ mod tests {
             host.policy_for("123456789", &[0xAA; 32]),
             Policy::StayConnected
         );
+    }
+
+    #[test]
+    fn list_is_sorted_and_tracks_changes() {
+        let (_, sk) = sign::gen_keypair();
+        let mut book = Book::load_from(&temp_path("list"), &sk.0);
+        assert!(book.list().is_empty());
+        book.upsert(pairing("ccc", [1; 32], Policy::AskAlways));
+        book.upsert(pairing("aaa", [2; 32], Policy::StayConnected));
+        book.upsert(pairing("bbb", [3; 32], Policy::AskAlways));
+        let ids: Vec<&str> = book.list().iter().map(|p| p.peer_id.as_str()).collect();
+        assert_eq!(ids, ["aaa", "bbb", "ccc"]);
+        book.remove("bbb");
+        let ids: Vec<&str> = book.list().iter().map(|p| p.peer_id.as_str()).collect();
+        assert_eq!(ids, ["aaa", "ccc"]);
+        assert_eq!(book.list()[0].policy, Policy::StayConnected);
     }
 
     #[test]

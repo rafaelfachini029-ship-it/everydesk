@@ -29,9 +29,10 @@ test('standard options in order', () => {
       'Confirmar a cada 80 min',
     ],
   )
-  // A stored non-standard period stays selectable; a standard one is not duplicated.
-  assert.equal(policyOptions({ kind: 'Reconfirm', every_min: 30 }).at(-1)!.key, 'r30')
-  assert.equal(policyOptions({ kind: 'Reconfirm', every_min: 45 }).length, 5)
+  assert.deepEqual(
+    policyOptions().map((o) => o.key),
+    ['ask', 'stay', 'r20', 'r45', 'r80'],
+  )
 })
 
 test('policy key round-trip and wire shape', () => {
@@ -44,6 +45,9 @@ test('policy key round-trip and wire shape', () => {
   assert.equal(JSON.stringify(policyFromKey('r20')), '{"kind":"Reconfirm","every_min":20}')
   assert.deepEqual(policyFromKey('bogus'), { kind: 'AskAlways' })
   assert.deepEqual(policyFromKey('r0'), { kind: 'AskAlways' })
+  // Only the offered periods exist.
+  assert.deepEqual(policyFromKey('r30'), { kind: 'AskAlways' })
+  assert.deepEqual(policyFromKey('r45'), { kind: 'Reconfirm', every_min: 45 })
 })
 
 test('presence updates only listed ids', () => {

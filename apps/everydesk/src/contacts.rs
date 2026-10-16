@@ -22,13 +22,7 @@
 //! allows one per 5 s per id); a request inside that window is answered from the last
 //! known state and the refresher is woken to query as soon as the window opens.
 
-use hbb_common::{
-    base64::{engine::general_purpose::STANDARD, Engine as _},
-    config::Config,
-    log,
-    sodiumoxide::crypto::{hash::sha256, secretbox},
-    tokio,
-};
+use hbb_common::{log, tokio};
 use librustdesk::everydesk::pairings::{book, contacts_book, Book, Pairing, Policy};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -66,13 +60,23 @@ impl From<Policy> for PolicyView {
     }
 }
 
-impl From<PolicyView> for Policy {
-    fn from(p: PolicyView) -> Self {
-        match p {
+/// The only reconfirmation periods the UI offers (minutes).
+pub const RECONFIRM_PERIODS_MIN: [u32; 3] = [20, 45, 80];
+
+/// Rejects a Reconfirm period outside `RECONFIRM_PERIODS_MIN`.
+impl TryFrom<PolicyView> for Policy {
+    type Error = String;
+    fn try_from(p: PolicyView) -> Result<Self, String> {
+        Ok(match p {
             PolicyView::AskAlways => Policy::AskAlways,
             PolicyView::StayConnected => Policy::StayConnected,
-            PolicyView::Reconfirm { every_min } => Policy::Reconfirm { every_min },
-        }
+            PolicyView::Reconfirm { every_min } if RECONFIRM_PERIODS_MIN.contains(&every_min) => {
+                Policy::Reconfirm { every_min }
+            }
+            PolicyView::Reconfirm { every_min } => {
+                return Err(format!("período de reconfirmação inválido: {every_min} min"))
+            }
+        })
     }
 }
 
@@ -105,60 +109,18 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Wakes the refresher early (a request was debounced).
 static WAKE: OnceLock<Mutex<Sender<()>>> = OnceLock::new();
 
-// ---- pairing book ----------------------------------------------------------------------
+// ---- pairing books ---------------------------------------------------------------------
 
-/// SEAM: `Book` has no way to list its entries (only `get`/`upsert`/`remove`), and the
-/// engine (`src/**`) is out of this task's scope. The ids are read from the sealed
-/// `pairings.json` / `contacts.json` that every book mutation saves (format of `pairings.rs`: JSON
-/// `{v:1, nonce, data}`, secretbox under sha256("everydesk-pairings-v1|" || sk)); each
-/// entry is then taken from the in-memory book, which stays the authority. Replace with a
-/// `Book::list()` when the engine gains one.
-const BOOK_FILE: &str = "pairings.json";
-const CONTACTS_FILE: &str = "contacts.json";
-const BOOK_KEY_CONTEXT: &[u8] = b"everydesk-pairings-v1|";
-
-#[derive(Deserialize)]
-struct Sealed {
-    v: u32,
-    nonce: String,
-    data: String,
-}
-
-fn book_file_ids(raw: &[u8], sk: &[u8]) -> Option<Vec<String>> {
-    if sk.is_empty() {
-        return None;
-    }
-    let sealed: Sealed = serde_json::from_slice(raw).ok()?;
-    if sealed.v != 1 {
-        return None;
-    }
-    let mut input = BOOK_KEY_CONTEXT.to_vec();
-    input.extend_from_slice(sk);
-    let key = secretbox::Key(sha256::hash(&input).0);
-    let nonce = secretbox::Nonce::from_slice(&STANDARD.decode(sealed.nonce).ok()?)?;
-    let plain = secretbox::open(&STANDARD.decode(sealed.data).ok()?, &nonce, &key).ok()?;
-    let list: Vec<Pairing> = serde_json::from_slice(&plain).ok()?;
-    Some(list.into_iter().map(|p| p.peer_id).collect())
-}
-
-/// Every entry of `book`, whose sealed file is `file`.
-fn entries(book: &std::sync::Mutex<Book>, file: &str) -> Vec<Pairing> {
-    let ids = match std::fs::read(Config::path(file)) {
-        Ok(raw) => book_file_ids(&raw, &Config::get_key_pair().0).unwrap_or_else(|| {
-            log::warn!("everydesk: {file} is not readable, its contacts are not listed");
-            vec![]
-        }),
-        Err(_) => vec![],
-    };
+fn entries(book: &std::sync::Mutex<Book>) -> Vec<Pairing> {
     let book = book.lock().unwrap_or_else(|e| e.into_inner());
-    ids.iter().filter_map(|id| book.get(id).cloned()).collect()
+    book.list().into_iter().cloned().collect()
 }
 
 /// Host-side pairings (policy editable) and controller-side contacts (policy `None`).
 fn pairings() -> Vec<(Pairing, bool)> {
     let mut out: Vec<(Pairing, bool)> =
-        entries(book(), BOOK_FILE).into_iter().map(|p| (p, true)).collect();
-    out.extend(entries(contacts_book(), CONTACTS_FILE).into_iter().map(|p| (p, false)));
+        entries(book()).into_iter().map(|p| (p, true)).collect();
+    out.extend(entries(contacts_book()).into_iter().map(|p| (p, false)));
     out
 }
 
@@ -215,11 +177,12 @@ pub async fn contacts_list() -> Vec<ContactView> {
 
 #[tauri::command]
 pub fn contacts_set_policy(peer_id: String, policy: PolicyView) -> Result<(), String> {
+    let engine = Policy::try_from(policy)?;
     let mut book = book().lock().unwrap_or_else(|e| e.into_inner());
     let Some(mut p) = book.get(&peer_id).cloned() else {
         return Err(format!("contato {peer_id} não encontrado"));
     };
-    p.policy = policy.into();
+    p.policy = engine;
     book.upsert(p);
     book.save().map_err(|e| {
         log::error!("everydesk: cannot save policy for {peer_id}: {e}");
@@ -447,9 +410,18 @@ mod tests {
         ];
         for (engine, view, json) in all {
             assert_eq!(PolicyView::from(engine), view);
-            assert_eq!(Policy::from(view), engine);
+            assert_eq!(Policy::try_from(view), Ok(engine));
             assert_eq!(serde_json::to_string(&view).unwrap(), json);
             assert_eq!(serde_json::from_str::<PolicyView>(json).unwrap(), view);
+        }
+        for m in [20, 45, 80] {
+            assert_eq!(
+                Policy::try_from(PolicyView::Reconfirm { every_min: m }),
+                Ok(Policy::Reconfirm { every_min: m })
+            );
+        }
+        for m in [0, 1, 30, 81] {
+            assert!(Policy::try_from(PolicyView::Reconfirm { every_min: m }).is_err());
         }
         assert!(serde_json::from_str::<PolicyView>(r#"{"kind":"Reconfirm"}"#).is_err());
         assert!(serde_json::from_str::<PolicyView>(r#""AskAlways""#).is_err());
@@ -516,28 +488,5 @@ mod tests {
         assert_eq!(cap_ids(ids(&["b", "a", "b"])), ["a", "b"]);
         let many: Vec<String> = (0..250).map(|i| format!("id{i:03}")).collect();
         assert_eq!(cap_ids(many).len(), MAX_IDS);
-    }
-
-    /// Mirrors `pairings.rs`' sealing, so a format drift in the engine shows up here.
-    #[test]
-    fn book_file_ids_reads_the_sealed_book() {
-        use hbb_common::sodiumoxide::crypto::sign;
-        let (_, sk) = sign::gen_keypair();
-        let mut input = BOOK_KEY_CONTEXT.to_vec();
-        input.extend_from_slice(&sk.0);
-        let key = secretbox::Key(sha256::hash(&input).0);
-        let nonce = secretbox::gen_nonce();
-        let plain = serde_json::to_vec(&vec![pairing("x", "n", Policy::AskAlways)]).unwrap();
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "v": 1,
-            "nonce": STANDARD.encode(nonce.0),
-            "data": STANDARD.encode(secretbox::seal(&plain, &nonce, &key)),
-        }))
-        .unwrap();
-        assert_eq!(book_file_ids(&raw, &sk.0), Some(vec!["x".to_owned()]));
-        let (_, other) = sign::gen_keypair();
-        assert_eq!(book_file_ids(&raw, &other.0), None);
-        assert_eq!(book_file_ids(b"junk", &sk.0), None);
-        assert_eq!(book_file_ids(&raw, &[]), None);
     }
 }
