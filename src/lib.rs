@@ -63,7 +63,11 @@ mod whiteboard;
 mod updater;
 
 mod ui_cm_interface;
+#[cfg(not(feature = "everydesk"))]
 mod ui_interface;
+// EveryDesk: the Tauri app reads the host status the same way the Sciter UI did.
+#[cfg(feature = "everydesk")]
+pub mod ui_interface;
 mod ui_session_interface;
 
 mod hbbs_http;

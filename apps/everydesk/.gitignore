@@ -1,0 +1,5 @@
+/target/
+/gen/schemas
+ui/node_modules
+ui/dist
+!icons/*.png

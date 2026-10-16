@@ -1,0 +1,25 @@
+[package]
+name = "everydesk"
+version = "0.1.0"
+description = "EveryDesk"
+edition = "2021"
+publish = false
+
+[lib]
+name = "everydesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "everydesk"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.4", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+rustdesk = { path = "../..", default-features = false, features = ["use_dasp", "everydesk"] }
+hbb_common = { path = "../../libs/hbb_common" }
