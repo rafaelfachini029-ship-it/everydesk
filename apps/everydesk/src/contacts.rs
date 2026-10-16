@@ -60,17 +60,18 @@ impl From<Policy> for PolicyView {
     }
 }
 
-/// The only reconfirmation periods the UI offers (minutes).
-pub const RECONFIRM_PERIODS_MIN: [u32; 3] = [20, 45, 80];
+/// Allowed reconfirmation periods (minutes): any value from 1 min to 24 h. The UI offers the
+/// presets 20/45/80 plus "Outro…" (spec: "ou livre").
+pub const RECONFIRM_PERIOD_RANGE_MIN: std::ops::RangeInclusive<u32> = 1..=1440;
 
-/// Rejects a Reconfirm period outside `RECONFIRM_PERIODS_MIN`.
+/// Rejects a Reconfirm period outside `RECONFIRM_PERIOD_RANGE_MIN`.
 impl TryFrom<PolicyView> for Policy {
     type Error = String;
     fn try_from(p: PolicyView) -> Result<Self, String> {
         Ok(match p {
             PolicyView::AskAlways => Policy::AskAlways,
             PolicyView::StayConnected => Policy::StayConnected,
-            PolicyView::Reconfirm { every_min } if RECONFIRM_PERIODS_MIN.contains(&every_min) => {
+            PolicyView::Reconfirm { every_min } if RECONFIRM_PERIOD_RANGE_MIN.contains(&every_min) => {
                 Policy::Reconfirm { every_min }
             }
             PolicyView::Reconfirm { every_min } => {
@@ -414,13 +415,13 @@ mod tests {
             assert_eq!(serde_json::to_string(&view).unwrap(), json);
             assert_eq!(serde_json::from_str::<PolicyView>(json).unwrap(), view);
         }
-        for m in [20, 45, 80] {
+        for m in [1, 20, 30, 45, 80, 81, 1440] {
             assert_eq!(
                 Policy::try_from(PolicyView::Reconfirm { every_min: m }),
                 Ok(Policy::Reconfirm { every_min: m })
             );
         }
-        for m in [0, 1, 30, 81] {
+        for m in [0, 1441, u32::MAX] {
             assert!(Policy::try_from(PolicyView::Reconfirm { every_min: m }).is_err());
         }
         assert!(serde_json::from_str::<PolicyView>(r#"{"kind":"Reconfirm"}"#).is_err());
@@ -460,6 +461,7 @@ mod tests {
             avatar: None,
             policy,
             created_at: 1,
+            ask_next: false,
         }
     }
 

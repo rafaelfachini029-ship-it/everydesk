@@ -5,12 +5,15 @@
 //! `cm:pair_offer {conn_id, peer_id, name, key_changed}` (the pending prompt `conn_id` comes
 //! from an authenticated controller that can be remembered; sent right after its
 //! `cm:incoming`), `cm:reconfirm {conn_id, ring_secs}` (periodic "still connected?" ring for
-//! an authorized session; the session keeps streaming meanwhile).
+//! an authorized session; the session keeps streaming meanwhile),
+//! `cm:identity {conn_id, state: "verified"|"unverified"|"key_changed", known}` (who is
+//! asking, sent for every prompt right after its `cm:incoming`; `known`: the claimed id is in
+//! one of the books, so an unverified or re-keyed claim is a loud warning).
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
 use crate::contacts::PolicyView;
-use librustdesk::everydesk::pairings::Policy;
+use librustdesk::everydesk::pairings::{IdentityState, Policy};
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 use tauri::{AppHandle, Emitter};
@@ -47,6 +50,14 @@ pub struct PairOffer {
     pub name: String,
     /// This id is already paired here under another key (reinstalled peer or impostor).
     pub key_changed: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Identity {
+    pub conn_id: i32,
+    pub state: IdentityState,
+    /// The claimed id is in the host or the contacts book.
+    pub known: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -103,6 +114,7 @@ pub struct CmState {
     pending: BTreeMap<i32, (Incoming, Instant)>,
     connected: BTreeMap<i32, Connected>,
     offers: BTreeMap<i32, PairOffer>,
+    identities: BTreeMap<i32, Identity>,
     reconfirms: BTreeMap<i32, (Reconfirm, Instant)>,
 }
 
@@ -128,6 +140,8 @@ pub struct CmSnapshot {
     pub connected: Vec<Connected>,
     /// Pair offers of the pending prompts.
     pub offers: Vec<PairOffer>,
+    /// Identity of the pending prompts.
+    pub identities: Vec<Identity>,
     /// Unanswered reconfirmation rings.
     pub reconfirms: Vec<ReconfirmSnapshot>,
 }
@@ -152,6 +166,12 @@ impl CmState {
         }
     }
 
+    pub fn identity(&mut self, i: Identity) {
+        if self.pending.contains_key(&i.conn_id) {
+            self.identities.insert(i.conn_id, i);
+        }
+    }
+
     pub fn ring(&mut self, r: Reconfirm, now: Instant) {
         self.reconfirms.insert(r.conn_id, (r, now));
     }
@@ -164,6 +184,7 @@ impl CmState {
     /// The UI accepted `conn_id`: its prompt becomes a connected session.
     pub fn authorize(&mut self, conn_id: i32) {
         self.offers.remove(&conn_id);
+        self.identities.remove(&conn_id);
         if let Some((p, _)) = self.pending.remove(&conn_id) {
             self.connected.insert(
                 conn_id,
@@ -180,6 +201,7 @@ impl CmState {
         self.pending.remove(&conn_id);
         self.connected.remove(&conn_id);
         self.offers.remove(&conn_id);
+        self.identities.remove(&conn_id);
         self.reconfirms.remove(&conn_id);
     }
 
@@ -195,6 +217,7 @@ impl CmState {
                 .collect(),
             connected: self.connected.values().cloned().collect(),
             offers: self.offers.values().cloned().collect(),
+            identities: self.identities.values().cloned().collect(),
             reconfirms: self
                 .reconfirms
                 .values()
@@ -267,6 +290,17 @@ impl InvokeUiCM for TauriCM {
         self.emit("cm:reconfirm", r);
     }
 
+    fn identity(&self, conn_id: i32, state: IdentityState, known: bool) {
+        log::info!("everydesk: identity #{conn_id} {state:?} (known={known})");
+        let i = Identity {
+            conn_id,
+            state,
+            known,
+        };
+        with_state(|s| s.identity(i.clone()));
+        self.emit("cm:identity", i);
+    }
+
     fn pair_offer(
         &self,
         conn_id: i32,
@@ -288,9 +322,9 @@ impl InvokeUiCM for TauriCM {
 }
 
 /// EveryDesk always asks: every login waits for the in-app accept prompt. Forced at each start
-/// because the config is shared with a stock RustDesk install (same `APP_NAME`), where
-/// `password` or both (`password::approve_mode`: anything but `click`/`password`) would let a
-/// password login in without a prompt.
+/// so that no stored `approve-mode` (`password` or both; `password::approve_mode`: anything
+/// but `click`/`password`) can ever let a password login in without a prompt. The config is
+/// EveryDesk's own (`APP_NAME` "EveryDesk", see docs/caminhos.md), not RustDesk's.
 pub fn force_click_approve_mode() {
     let cur = Config::get_option("approve-mode");
     if needs_click_override(&cur) {
@@ -343,8 +377,8 @@ pub fn cm_reconfirm_result(conn_id: i32, ok: bool) {
 }
 
 /// Accepts the pending prompt `conn_id` (like `cm_authorize`); with `accepted`, also
-/// remembers the controller under `policy` (`null` = AskAlways; a Reconfirm period other
-/// than 20/45/80 min is rejected before anything reaches the engine). `replace_key` (default
+/// remembers the controller under `policy` (`null` = AskAlways; a Reconfirm period outside
+/// 1..=1440 min is rejected before anything reaches the engine). `replace_key` (default
 /// false) is the explicit "Substituir chave guardada" answer for a `key_changed` offer:
 /// without it the engine keeps the key already pinned.
 #[tauri::command]
@@ -481,10 +515,23 @@ mod tests {
             json["reconfirms"][0],
             serde_json::json!({"conn_id": 2, "ring_secs": 60, "age_ms": 500})
         );
+        let id = Identity {
+            conn_id: 1,
+            state: IdentityState::Unverified,
+            known: true,
+        };
+        s.identity(id.clone());
+        s.identity(Identity { conn_id: 9, ..id.clone() });
+        let snap = s.snapshot(t0);
+        assert_eq!(snap.identities, vec![id]);
+        assert_eq!(
+            serde_json::to_value(&snap).unwrap()["identities"][0],
+            serde_json::json!({"conn_id": 1, "state": "unverified", "known": true})
+        );
         s.authorize(1);
         s.answered(2);
         let snap = s.snapshot(t0);
-        assert!(snap.offers.is_empty() && snap.reconfirms.is_empty());
+        assert!(snap.offers.is_empty() && snap.reconfirms.is_empty() && snap.identities.is_empty());
         s.ring(Reconfirm { conn_id: 1, ring_secs: 60 }, t0);
         s.remove(1);
         assert_eq!(s.snapshot(t0), CmSnapshot::default());

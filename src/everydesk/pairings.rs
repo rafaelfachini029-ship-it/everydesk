@@ -36,6 +36,44 @@ pub struct Pairing {
     #[serde(default)]
     pub policy: Policy,
     pub created_at: i64,
+    /// The owner denied (or let time out) a reconfirmation: the next login goes through the
+    /// accept card whatever the policy, so reconnecting cannot undo the deny. Cleared when
+    /// the owner accepts a card for this peer.
+    #[serde(default)]
+    pub ask_next: bool,
+}
+
+/// What the accept card may say about who is asking (`ipc::Data::IdentityInfo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityState {
+    /// The controller signed the login with a key bound to this connection, and no book
+    /// pins its id to another key.
+    Verified,
+    /// No (valid) signature: the id and name are only what the peer claims.
+    Unverified,
+    /// Signed, but one of the books pins this id to another key.
+    KeyChanged,
+}
+
+/// The identity of a pending login: `controller_pk` is the verified controller key (`None`
+/// when unauthenticated). The bool is true when the claimed id is in either book (an
+/// unverified or re-keyed claim of a known id is the loud "a chave não confere" case).
+pub fn identity_of(
+    controller_pk: Option<&[u8; 32]>,
+    peer_id: &str,
+    host: &Book,
+    contacts: &Book,
+) -> (IdentityState, bool) {
+    let known = host.get(peer_id).is_some() || contacts.get(peer_id).is_some();
+    let state = match controller_pk {
+        None => IdentityState::Unverified,
+        Some(pk) if host.key_changed(peer_id, pk) || contacts.key_changed(peer_id, pk) => {
+            IdentityState::KeyChanged
+        }
+        Some(_) => IdentityState::Verified,
+    };
+    (state, known)
 }
 
 // No Debug: it holds the machine sk.
@@ -73,10 +111,24 @@ impl Book {
             Some(list) => {
                 book.pairings = list.into_iter().map(|p| (p.peer_id.clone(), p)).collect();
             }
-            None => log::warn!(
-                "pairings: {} is not readable with this machine's key, starting empty",
-                path.display()
-            ),
+            None => {
+                // Keep the old file (e.g. the machine key was regenerated): a later save must
+                // not silently overwrite what may still be recoverable.
+                let bak = backup_path(path, hbb_common::get_time());
+                match std::fs::rename(path, &bak) {
+                    Ok(()) => log::warn!(
+                        "pairings: {} is not readable with this machine's key; moved to {}, starting empty",
+                        path.display(),
+                        bak.display()
+                    ),
+                    Err(e) => log::warn!(
+                        "pairings: {} is not readable with this machine's key and cannot be moved to {}: {}; starting empty",
+                        path.display(),
+                        bak.display(),
+                        e
+                    ),
+                }
+            }
         }
         book
     }
@@ -129,12 +181,24 @@ impl Book {
         self.pairings.remove(peer_id);
     }
 
-    /// The stored policy only when `peer_id` is paired AND presents the pk it paired with;
-    /// anything else (unknown id, or a known id with another key) is `AskAlways`.
+    /// The stored policy only when `peer_id` is paired AND presents the pk it paired with
+    /// AND no deny is pending (`ask_next`); anything else is `AskAlways`.
     pub fn policy_for(&self, peer_id: &str, pk: &[u8; 32]) -> Policy {
         match self.pairings.get(peer_id) {
-            Some(p) if pk_eq(&p.pk, pk) => p.policy,
+            Some(p) if pk_eq(&p.pk, pk) && !p.ask_next => p.policy,
             _ => Policy::AskAlways,
+        }
+    }
+
+    /// Sets `peer_id`'s `ask_next`. With `pk`, only when the pairing is pinned to that key
+    /// (an impostor's accepted card must not lift a deny). True when it changed.
+    pub fn set_ask_next(&mut self, peer_id: &str, pk: Option<&[u8; 32]>, on: bool) -> bool {
+        match self.pairings.get_mut(peer_id) {
+            Some(p) if p.ask_next != on && pk.map_or(true, |k| pk_eq(&p.pk, k)) => {
+                p.ask_next = on;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -190,6 +254,15 @@ fn decrypt(raw: &[u8], sk: &[u8]) -> Option<Vec<u8>> {
     secretbox::open(&STANDARD.decode(sealed.data).ok()?, &nonce, &key).ok()
 }
 
+/// `<file name>.bak-<ts>` next to `path`.
+fn backup_path(path: &Path, ts: i64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| FILE_NAME.to_owned());
+    path.with_file_name(format!("{name}.bak-{ts}"))
+}
+
 fn pk_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     hbb_common::sodiumoxide::utils::memcmp(a, b)
 }
@@ -232,6 +305,7 @@ pub fn apply_wire_to_contacts(contacts: &mut Book, peer_id: &str, ev: WireEvent,
                 // Placeholder: the contacts book only lists contacts.
                 policy: Policy::AskAlways,
                 created_at: existing.map(|p| p.created_at).unwrap_or(now),
+                ask_next: false,
             });
             true
         }
@@ -258,6 +332,7 @@ mod tests {
             avatar: Some(vec![1, 2, 3]),
             policy,
             created_at: 1_800_000_000,
+            ask_next: false,
         }
     }
 
@@ -399,5 +474,94 @@ mod tests {
         let (_, other) = sign::gen_keypair();
         assert!(Book::load_from(&path, &other.0).get("123456789").is_none());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn unreadable_book_is_moved_aside() {
+        let (_, sk) = sign::gen_keypair();
+        let path = temp_path("bak");
+        let mut book = Book::load_from(&path, &sk.0);
+        book.upsert(pairing("123456789", [0xAA; 32], Policy::StayConnected));
+        book.save().unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        // The machine key was regenerated: the book is unreadable, starts empty, and the old
+        // file is kept as `pairings.json.bak-<ts>` instead of being overwritten by a save.
+        let (_, other) = sign::gen_keypair();
+        let mut fresh = Book::load_from(&path, &other.0);
+        assert!(fresh.get("123456789").is_none());
+        assert!(!path.exists());
+        let dir = path.parent().unwrap();
+        let baks: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("pairings.json.bak-")
+            })
+            .collect();
+        assert_eq!(baks.len(), 1);
+        assert_eq!(std::fs::read(&baks[0]).unwrap(), original);
+        fresh.upsert(pairing("987654321", [0xBB; 32], Policy::AskAlways));
+        fresh.save().unwrap();
+        assert_eq!(std::fs::read(&baks[0]).unwrap(), original);
+        // The original key still reads the backup.
+        let restored = Book::load_from(&baks[0], &sk.0);
+        assert!(restored.get("123456789").is_some());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn deny_forces_card_on_next_login() {
+        let (_, sk) = sign::gen_keypair();
+        let path = temp_path("asknext");
+        let mut book = Book::load_from(&path, &sk.0);
+        let a = [0xAA; 32];
+        let b = [0xBB; 32];
+        book.upsert(pairing("123456789", a, Policy::Reconfirm { every_min: 20 }));
+        // Reconfirmation denied (or timed out): flagged and persisted.
+        assert!(book.set_ask_next("123456789", None, true));
+        book.save().unwrap();
+        let mut book = Book::load_from(&path, &sk.0);
+        // Reconnecting does not bring a fresh period: the card decides.
+        assert_eq!(book.policy_for("123456789", &a), Policy::AskAlways);
+        assert!(book.get("123456789").unwrap().ask_next);
+        // Another key accepted from a card does not lift the deny.
+        assert!(!book.set_ask_next("123456789", Some(&b), false));
+        assert_eq!(book.policy_for("123456789", &a), Policy::AskAlways);
+        // The owner accepted the card for the pinned key: the policy applies again.
+        assert!(book.set_ask_next("123456789", Some(&a), false));
+        assert_eq!(
+            book.policy_for("123456789", &a),
+            Policy::Reconfirm { every_min: 20 }
+        );
+        // Unknown id: nothing to flag.
+        assert!(!book.set_ask_next("000", None, true));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn identity_of_flags_unverified_and_changed_keys() {
+        let (_, sk) = sign::gen_keypair();
+        let mut host = Book::load_from(&temp_path("id-host"), &sk.0);
+        let mut contacts = Book::load_from(&temp_path("id-contacts"), &sk.0);
+        let a = [0xAA; 32];
+        let b = [0xBB; 32];
+        host.upsert(pairing("111", a, Policy::StayConnected));
+        contacts.upsert(pairing("222", a, Policy::AskAlways));
+        use IdentityState::*;
+        assert_eq!(identity_of(None, "999", &host, &contacts), (Unverified, false));
+        assert_eq!(identity_of(None, "111", &host, &contacts), (Unverified, true));
+        assert_eq!(identity_of(None, "222", &host, &contacts), (Unverified, true));
+        assert_eq!(identity_of(Some(&a), "111", &host, &contacts), (Verified, true));
+        assert_eq!(identity_of(Some(&b), "999", &host, &contacts), (Verified, false));
+        assert_eq!(identity_of(Some(&b), "111", &host, &contacts), (KeyChanged, true));
+        assert_eq!(identity_of(Some(&b), "222", &host, &contacts), (KeyChanged, true));
+        assert_eq!(
+            serde_json::to_string(&KeyChanged).unwrap(),
+            "\"key_changed\""
+        );
     }
 }

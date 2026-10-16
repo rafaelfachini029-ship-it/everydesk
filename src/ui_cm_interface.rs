@@ -204,6 +204,17 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
     #[cfg(feature = "everydesk")]
     fn reconfirm(&self, _conn_id: i32, _ring_secs: u32) {}
 
+    /// EveryDesk: who is asking for the pending login `conn_id` (sent for every prompt,
+    /// before any `pair_offer`). `known`: the claimed id is in one of the books.
+    #[cfg(feature = "everydesk")]
+    fn identity(
+        &self,
+        _conn_id: i32,
+        _state: crate::everydesk::pairings::IdentityState,
+        _known: bool,
+    ) {
+    }
+
     /// EveryDesk: the pending login `conn_id` comes from an authenticated controller that can
     /// be remembered; the accept card may offer "Aceitar e lembrar" (answer with `pair_ack`).
     /// `key_changed`: this id is already paired under another key ("a chave desta máquina
@@ -656,6 +667,10 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 // This IPC stream belongs to `self.conn_id`; the field is informative.
                                 Data::Reconfirm { conn_id: _, ring_secs } => {
                                     self.cm.reconfirm(self.conn_id, ring_secs);
+                                }
+                                #[cfg(feature = "everydesk")]
+                                Data::IdentityInfo { conn_id: _, state, known } => {
+                                    self.cm.identity(self.conn_id, state, known);
                                 }
                                 #[cfg(feature = "everydesk")]
                                 Data::PairOffer { conn_id: _, peer_id, name, avatar, key_changed } => {

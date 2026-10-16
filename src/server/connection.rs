@@ -801,6 +801,8 @@ impl Connection {
                 Some(data) = rx_from_cm.recv() => {
                     match data {
                         ipc::Data::Authorize => {
+                            #[cfg(feature = "everydesk")]
+                            conn.card_accepted();
                             conn.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
                             conn.require_2fa.take();
                             if !conn.send_logon_response_and_keep_alive().await {
@@ -825,6 +827,7 @@ impl Connection {
                             if conn.authorized {
                                 continue;
                             }
+                            conn.card_accepted();
                             let remembered =
                                 accepted && conn.remember_controller(policy, replace_key);
                             conn.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
@@ -848,6 +851,7 @@ impl Connection {
                         #[cfg(feature = "everydesk")]
                         ipc::Data::ReconfirmResult { conn_id: _, ok } => {
                             if !conn.on_reconfirm_result(ok) {
+                                conn.ask_next_login();
                                 conn.close_by_owner("reconfirmation denied").await;
                                 break;
                             }
@@ -3150,12 +3154,17 @@ impl Connection {
                     return keep_alive;
                 }
                 #[cfg(feature = "everydesk")]
+                let identity = self.identity_info(&lr.my_id);
+                #[cfg(feature = "everydesk")]
                 let pair_offer = self.pair_offer(&lr.my_id, &lr.my_name, &lr.avatar);
                 self.try_start_cm(lr.my_id, lr.my_name, false);
                 // After `Login`, so the CM already knows this connection.
                 #[cfg(feature = "everydesk")]
-                if let Some(offer) = pair_offer {
-                    self.send_to_cm(offer);
+                {
+                    self.send_to_cm(identity);
+                    if let Some(offer) = pair_offer {
+                        self.send_to_cm(offer);
+                    }
                 }
                 if self.click_approve_prompted.is_none() {
                     self.click_approve_prompted = Some(Instant::now());
@@ -5465,6 +5474,7 @@ impl Connection {
         if r.expires_at().map_or(false, |at| now >= at) {
             log::info!("everydesk: reconfirmation for {} timed out", self.lr.my_id);
             self.reconfirm = None;
+            self.ask_next_login();
             self.send_close_reason_no_retry(crate::client::LOGIN_MSG_RECONFIRM_TIMEOUT)
                 .await;
             self.on_close("reconfirmation timeout", true).await;
@@ -5545,6 +5555,55 @@ impl Connection {
         Some(true)
     }
 
+    /// EveryDesk: what the accept card may say about who is asking (verified, unverified, or
+    /// signed with another key than the one a book pins for this id).
+    #[cfg(feature = "everydesk")]
+    fn identity_info(&self, peer_id: &str) -> ipc::Data {
+        use crate::everydesk::pairings::{book, contacts_book, identity_of, IdentityState};
+        let (state, known) = {
+            let host = book().lock().unwrap();
+            let contacts = contacts_book().lock().unwrap();
+            identity_of(self.controller_pk.as_ref(), peer_id, &host, &contacts)
+        };
+        if known && state != IdentityState::Verified {
+            log::warn!("everydesk: {} claims a known id but is {:?}", peer_id, state);
+        }
+        ipc::Data::IdentityInfo {
+            conn_id: self.inner.id(),
+            state,
+            known,
+        }
+    }
+
+    /// EveryDesk: the owner denied (or let time out) a reconfirmation; the next login of
+    /// this peer goes through the accept card whatever its policy (persisted).
+    #[cfg(feature = "everydesk")]
+    fn ask_next_login(&self) {
+        let mut book = crate::everydesk::pairings::book().lock().unwrap();
+        if book.set_ask_next(&self.lr.my_id, None, true) {
+            log::info!("everydesk: {} must be accepted on its next login", self.lr.my_id);
+            if let Err(e) = book.save() {
+                log::error!("pairings: cannot save {}: {}", self.lr.my_id, e);
+            }
+        }
+    }
+
+    /// EveryDesk: the owner accepted this login's card; a pending `ask_next` is lifted, but
+    /// only for the verified key the peer is pinned to.
+    #[cfg(feature = "everydesk")]
+    fn card_accepted(&self) {
+        let Some(pk) = self.controller_pk else {
+            return;
+        };
+        let mut book = crate::everydesk::pairings::book().lock().unwrap();
+        if book.set_ask_next(&self.lr.my_id, Some(&pk), false) {
+            log::info!("everydesk: {} accepted again, policy applies", self.lr.my_id);
+            if let Err(e) = book.save() {
+                log::error!("pairings: cannot save {}: {}", self.lr.my_id, e);
+            }
+        }
+    }
+
     /// EveryDesk: the `PairOffer` for the CM when the pending login comes from an authenticated
     /// controller (it can be remembered); `None` for an unauthenticated one.
     #[cfg(feature = "everydesk")]
@@ -5607,6 +5666,7 @@ impl Connection {
                         .then(|| self.lr.avatar.as_bytes().to_vec()),
                     policy,
                     created_at,
+                    ask_next: false,
                 },
                 replace_key,
             );

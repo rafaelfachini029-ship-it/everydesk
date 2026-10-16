@@ -426,6 +426,15 @@ pub enum Data {
         /// remembering then needs `PairAck.replace_key`.
         key_changed: bool,
     },
+    /// EveryDesk, connection -> CM: who is asking, sent right after every `Login` prompt.
+    /// `known`: the claimed id is in one of the books (an unverified or re-keyed claim of a
+    /// known id is the loud "a chave não confere" warning). Only `Verified` may be remembered.
+    #[cfg(feature = "everydesk")]
+    IdentityInfo {
+        conn_id: i32,
+        state: crate::everydesk::pairings::IdentityState,
+        known: bool,
+    },
     /// EveryDesk, CM -> connection: accept the pending login; with `accepted` also remember
     /// the controller under `policy` (deny is `Close`). A peer pinned to another key is only
     /// re-pinned with `replace_key` (the owner confirmed the key change).
