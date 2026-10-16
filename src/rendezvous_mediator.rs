@@ -43,15 +43,14 @@ type Message = RendezvousMessage;
 /// taken on the server) a new code replaces the numeric `Config::update_id()` fallback.
 #[cfg(feature = "everydesk")]
 pub static ID_REGENERATOR: std::sync::OnceLock<fn() -> String> = std::sync::OnceLock::new();
-// Not gated: the counter logic is pure and unit-tested in the stock build too.
-#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
+#[cfg(feature = "everydesk")]
 const MAX_ID_REGENERATIONS: u8 = 5;
-#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
+#[cfg(feature = "everydesk")]
 static ID_REGENERATIONS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Claims the next regeneration attempt: `Some(n)` (1-based) while fewer than `max` attempts
 /// were made since the last successful registration, `None` once exhausted (saturates).
-#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
+#[cfg(feature = "everydesk")]
 fn claim_regeneration(counter: &std::sync::atomic::AtomicU8, max: u8) -> Option<u8> {
     counter
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1))
@@ -61,7 +60,7 @@ fn claim_regeneration(counter: &std::sync::atomic::AtomicU8, max: u8) -> Option<
 
 /// A successful registration (`RegisterPkResponse::OK`) gives the next collision a fresh
 /// budget of attempts.
-#[cfg_attr(not(feature = "everydesk"), allow(dead_code))]
+#[cfg(feature = "everydesk")]
 fn reset_regenerations(counter: &std::sync::atomic::AtomicU8) {
     counter.store(0, Ordering::SeqCst);
 }
@@ -1785,6 +1784,7 @@ impl Drop for CheckIfResendPk {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "everydesk")]
     #[test]
     fn id_regeneration_budget_resets_after_ok() {
         use super::{claim_regeneration, reset_regenerations};

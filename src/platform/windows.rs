@@ -1,6 +1,7 @@
 use super::{CursorData, ResultType};
+#[cfg(not(feature = "everydesk"))]
+use crate::common::PORTABLE_APPNAME_RUNTIME_ENV_KEY;
 use crate::{
-    common::PORTABLE_APPNAME_RUNTIME_ENV_KEY,
     custom_server::*,
     ipc,
     privacy_mode::win_topmost_window::{self, WIN_TOPMOST_INJECTED_PROCESS_EXE},
