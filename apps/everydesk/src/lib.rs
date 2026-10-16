@@ -137,6 +137,11 @@ fn run() {
             cm::cm_authorize,
             cm::cm_close,
             cm::cm_pending,
+            cm::cm_reconfirm_result,
+            cm::cm_pair_ack,
+            contacts::contacts_list,
+            contacts::contacts_set_policy,
+            contacts::contacts_remove,
             contacts::contacts_presence,
         ])
         .build(tauri::generate_context!())

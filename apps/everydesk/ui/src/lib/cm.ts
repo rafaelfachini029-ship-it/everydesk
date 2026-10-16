@@ -8,6 +8,8 @@ export const CM_EVENTS = {
   incoming: 'cm:incoming',
   connected: 'cm:connected',
   removed: 'cm:removed',
+  pairOffer: 'cm:pair_offer',
+  reconfirm: 'cm:reconfirm',
 } as const
 
 export interface Incoming {
@@ -28,10 +30,31 @@ export interface PendingSnapshot extends Incoming {
   age_ms: number
 }
 
+/** `cm:pair_offer`: the pending prompt `conn_id` can be remembered as a contact. */
+export interface PairOffer {
+  conn_id: number
+  peer_id: string
+  name: string
+  /** Already paired under another key: warn, and re-pin only with `replace_key`. */
+  key_changed: boolean
+}
+
+/** `cm:reconfirm`: "still connected?" ring for an authorized session. */
+export interface Reconfirm {
+  conn_id: number
+  ring_secs: number
+}
+
+export interface ReconfirmSnapshot extends Reconfirm {
+  age_ms: number
+}
+
 /** `cm_pending` result: what the UI shows, for hydrating after mount. */
 export interface CmSnapshot {
   pending: PendingSnapshot[]
   connected: Connected[]
+  offers: PairOffer[]
+  reconfirms: ReconfirmSnapshot[]
 }
 
 export interface Removed {

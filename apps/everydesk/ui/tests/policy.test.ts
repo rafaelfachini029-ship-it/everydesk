@@ -1,0 +1,64 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { remainingSeconds } from '../src/lib/cm.ts'
+import {
+  applyPresence,
+  policyFromKey,
+  policyKey,
+  policyLabel,
+  policyOptions,
+  type Contact,
+  type Policy,
+} from '../src/lib/policy.ts'
+
+test('policy labels', () => {
+  assert.equal(policyLabel({ kind: 'AskAlways' }), 'Sempre perguntar')
+  assert.equal(policyLabel({ kind: 'StayConnected' }), 'Entrar direto')
+  assert.equal(policyLabel({ kind: 'Reconfirm', every_min: 20 }), 'Confirmar a cada 20 min')
+  assert.equal(policyLabel(null), '—')
+})
+
+test('standard options in order', () => {
+  assert.deepEqual(
+    policyOptions().map((o) => o.label),
+    [
+      'Sempre perguntar',
+      'Entrar direto',
+      'Confirmar a cada 20 min',
+      'Confirmar a cada 45 min',
+      'Confirmar a cada 80 min',
+    ],
+  )
+  // A stored non-standard period stays selectable; a standard one is not duplicated.
+  assert.equal(policyOptions({ kind: 'Reconfirm', every_min: 30 }).at(-1)!.key, 'r30')
+  assert.equal(policyOptions({ kind: 'Reconfirm', every_min: 45 }).length, 5)
+})
+
+test('policy key round-trip and wire shape', () => {
+  const all: Policy[] = [
+    { kind: 'AskAlways' },
+    { kind: 'StayConnected' },
+    { kind: 'Reconfirm', every_min: 80 },
+  ]
+  for (const p of all) assert.deepEqual(policyFromKey(policyKey(p)), p)
+  assert.equal(JSON.stringify(policyFromKey('r20')), '{"kind":"Reconfirm","every_min":20}')
+  assert.deepEqual(policyFromKey('bogus'), { kind: 'AskAlways' })
+  assert.deepEqual(policyFromKey('r0'), { kind: 'AskAlways' })
+})
+
+test('presence updates only listed ids', () => {
+  const list: Contact[] = [
+    { peer_id: 'a', name: 'A', policy: null, online: false },
+    { peer_id: 'b', name: 'B', policy: { kind: 'AskAlways' }, online: true },
+  ]
+  const out = applyPresence(list, [{ peer_id: 'a', online: true }])
+  assert.deepEqual(out.map((c) => c.online), [true, true])
+})
+
+test('reconfirm ring reuses remainingSeconds with ring_secs', () => {
+  const t0 = 1_000_000
+  assert.equal(remainingSeconds(t0, t0, 60), 60)
+  assert.equal(remainingSeconds(t0, t0 + 59_500, 60), 1)
+  assert.equal(remainingSeconds(t0, t0 + 60_000, 60), 0)
+  assert.equal(remainingSeconds(t0, t0 + 10_000, 30), 20)
+})

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
   import { onMount } from 'svelte'
+  import Contacts from './lib/Contacts.svelte'
   import IncomingCard from './lib/IncomingCard.svelte'
   import RemoteCanvas from './lib/RemoteCanvas.svelte'
   import type { MsgBox } from './lib/session'
@@ -35,6 +36,12 @@
     remote = { peerId: id, password }
   }
 
+  /** A contact connects without a password: the host's policy (or its card) decides. */
+  function connectContact(id: string) {
+    lastError = ''
+    remote = { peerId: id, password: '' }
+  }
+
   function onclosed(last: MsgBox | null) {
     remote = null
     if (last && last.kind.includes('error')) lastError = `${last.title}: ${last.text}`
@@ -55,6 +62,8 @@
       <button type="submit">Conectar</button>
     </form>
     {#if lastError}<p class="error">{lastError}</p>{/if}
+
+    <Contacts onconnect={connectContact} />
   </main>
 {/if}
 <IncomingCard />

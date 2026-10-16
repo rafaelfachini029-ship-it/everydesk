@@ -1,10 +1,15 @@
 //! Accessed side: the app is RustDesk's connection manager. The in-process host server
 //! (`start_server`) reaches it over the `_cm` IPC, so the engine never spawns `--cm`.
 //! Events: `cm:incoming` (accept prompt), `cm:connected` (authorized session),
-//! `cm:removed` (connection gone, including the 60 s click-approve timeout).
+//! `cm:removed` (connection gone, including the 60 s click-approve timeout),
+//! `cm:pair_offer {conn_id, peer_id, name, key_changed}` (the pending prompt `conn_id` comes
+//! from an authenticated controller that can be remembered; sent right after its
+//! `cm:incoming`), `cm:reconfirm {conn_id, ring_secs}` (periodic "still connected?" ring for
+//! an authorized session; the session keeps streaming meanwhile).
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
+use crate::contacts::PolicyView;
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Mutex, time::Instant};
 use tauri::{AppHandle, Emitter};
@@ -32,6 +37,21 @@ pub struct Connected {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Removed {
     pub conn_id: i32,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct PairOffer {
+    pub conn_id: i32,
+    pub peer_id: String,
+    pub name: String,
+    /// This id is already paired here under another key (reinstalled peer or impostor).
+    pub key_changed: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Reconfirm {
+    pub conn_id: i32,
+    pub ring_secs: u32,
 }
 
 /// Which event a `Client` reported by the engine maps to.
@@ -81,6 +101,8 @@ pub fn event_from(
 pub struct CmState {
     pending: BTreeMap<i32, (Incoming, Instant)>,
     connected: BTreeMap<i32, Connected>,
+    offers: BTreeMap<i32, PairOffer>,
+    reconfirms: BTreeMap<i32, (Reconfirm, Instant)>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -91,10 +113,22 @@ pub struct PendingSnapshot {
     pub age_ms: u64,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ReconfirmSnapshot {
+    #[serde(flatten)]
+    pub reconfirm: Reconfirm,
+    /// How long the ring has been up.
+    pub age_ms: u64,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct CmSnapshot {
     pub pending: Vec<PendingSnapshot>,
     pub connected: Vec<Connected>,
+    /// Pair offers of the pending prompts.
+    pub offers: Vec<PairOffer>,
+    /// Unanswered reconfirmation rings.
+    pub reconfirms: Vec<ReconfirmSnapshot>,
 }
 
 impl CmState {
@@ -111,8 +145,24 @@ impl CmState {
         }
     }
 
+    pub fn offer(&mut self, o: PairOffer) {
+        if self.pending.contains_key(&o.conn_id) {
+            self.offers.insert(o.conn_id, o);
+        }
+    }
+
+    pub fn ring(&mut self, r: Reconfirm, now: Instant) {
+        self.reconfirms.insert(r.conn_id, (r, now));
+    }
+
+    /// The ring for `conn_id` was answered.
+    pub fn answered(&mut self, conn_id: i32) {
+        self.reconfirms.remove(&conn_id);
+    }
+
     /// The UI accepted `conn_id`: its prompt becomes a connected session.
     pub fn authorize(&mut self, conn_id: i32) {
+        self.offers.remove(&conn_id);
         if let Some((p, _)) = self.pending.remove(&conn_id) {
             self.connected.insert(
                 conn_id,
@@ -128,6 +178,8 @@ impl CmState {
     pub fn remove(&mut self, conn_id: i32) {
         self.pending.remove(&conn_id);
         self.connected.remove(&conn_id);
+        self.offers.remove(&conn_id);
+        self.reconfirms.remove(&conn_id);
     }
 
     pub fn snapshot(&self, now: Instant) -> CmSnapshot {
@@ -141,6 +193,15 @@ impl CmState {
                 })
                 .collect(),
             connected: self.connected.values().cloned().collect(),
+            offers: self.offers.values().cloned().collect(),
+            reconfirms: self
+                .reconfirms
+                .values()
+                .map(|(r, at)| ReconfirmSnapshot {
+                    reconfirm: r.clone(),
+                    age_ms: now.saturating_duration_since(*at).as_millis() as u64,
+                })
+                .collect(),
         }
     }
 }
@@ -169,6 +230,12 @@ impl TauriCM {
             log::error!("everydesk: cm emit failed: {e}");
         }
     }
+
+    fn emit<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        if let Err(e) = self.app.emit(event, payload) {
+            log::error!("everydesk: cm emit {event} failed: {e}");
+        }
+    }
 }
 
 impl InvokeUiCM for TauriCM {
@@ -191,6 +258,32 @@ impl InvokeUiCM for TauriCM {
     fn show_elevation(&self, _show: bool) {}
     fn update_voice_call_state(&self, _client: &Client) {}
     fn file_transfer_log(&self, _action: &str, _log: &str) {}
+
+    fn reconfirm(&self, conn_id: i32, ring_secs: u32) {
+        log::info!("everydesk: reconfirm #{conn_id} ({ring_secs} s)");
+        let r = Reconfirm { conn_id, ring_secs };
+        with_state(|s| s.ring(r.clone(), Instant::now()));
+        self.emit("cm:reconfirm", r);
+    }
+
+    fn pair_offer(
+        &self,
+        conn_id: i32,
+        peer_id: String,
+        name: String,
+        _avatar: Option<Vec<u8>>,
+        key_changed: bool,
+    ) {
+        log::info!("everydesk: pair offer #{conn_id} from {peer_id} (key_changed={key_changed})");
+        let o = PairOffer {
+            conn_id,
+            peer_id,
+            name,
+            key_changed,
+        };
+        with_state(|s| s.offer(o.clone()));
+        self.emit("cm:pair_offer", o);
+    }
 }
 
 /// EveryDesk always asks: every login waits for the in-app accept prompt. Forced at each start
@@ -237,6 +330,32 @@ pub fn cm_authorize(conn_id: i32) {
 #[tauri::command]
 pub fn cm_pending() -> CmSnapshot {
     with_state(|s| s.snapshot(Instant::now()))
+}
+
+/// Answer to a `cm:reconfirm` ring: `ok` keeps the session (next ring one period later),
+/// `!ok` ends it. Unanswered, the engine ends it after `ring_secs`.
+#[tauri::command]
+pub fn cm_reconfirm_result(conn_id: i32, ok: bool) {
+    log::info!("everydesk: reconfirm #{conn_id} -> {ok}");
+    with_state(|s| s.answered(conn_id));
+    ui_cm_interface::reconfirm_result(conn_id, ok);
+}
+
+/// Accepts the pending prompt `conn_id` (like `cm_authorize`); with `accepted`, also
+/// remembers the controller under `policy` (`null` = AskAlways). `replace_key` (default
+/// false) is the explicit "Substituir chave guardada" answer for a `key_changed` offer:
+/// without it the engine keeps the key already pinned.
+#[tauri::command]
+pub fn cm_pair_ack(
+    conn_id: i32,
+    accepted: bool,
+    policy: Option<PolicyView>,
+    replace_key: Option<bool>,
+) {
+    let replace_key = replace_key.unwrap_or(false);
+    log::info!("everydesk: pair ack #{conn_id} accepted={accepted} policy={policy:?} replace_key={replace_key}");
+    ui_cm_interface::pair_ack(conn_id, accepted, policy.map(Into::into), replace_key);
+    with_state(|s| s.authorize(conn_id));
 }
 
 #[tauri::command]
@@ -329,5 +448,41 @@ mod tests {
             librustdesk::client::LOGIN_MSG_TIMEOUT,
             "Pedido não respondido em 60 s"
         );
+    }
+
+    #[test]
+    fn offers_and_rings_are_hydrated_and_cleared() {
+        let t0 = Instant::now();
+        let mut s = CmState::default();
+        let offer = |id| PairOffer {
+            conn_id: id,
+            peer_id: "abc".into(),
+            name: "n".into(),
+            key_changed: false,
+        };
+        // An offer for an unknown conn is dropped.
+        s.offer(offer(9));
+        s.apply(&event_from(1, false, "abc", "n", false), t0);
+        s.offer(offer(1));
+        s.ring(Reconfirm { conn_id: 2, ring_secs: 60 }, t0);
+        let snap = s.snapshot(t0 + std::time::Duration::from_millis(500));
+        assert_eq!(snap.offers, vec![offer(1)]);
+        assert_eq!(snap.reconfirms[0].age_ms, 500);
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(
+            json["offers"][0],
+            serde_json::json!({"conn_id": 1, "peer_id": "abc", "name": "n", "key_changed": false})
+        );
+        assert_eq!(
+            json["reconfirms"][0],
+            serde_json::json!({"conn_id": 2, "ring_secs": 60, "age_ms": 500})
+        );
+        s.authorize(1);
+        s.answered(2);
+        let snap = s.snapshot(t0);
+        assert!(snap.offers.is_empty() && snap.reconfirms.is_empty());
+        s.ring(Reconfirm { conn_id: 1, ring_secs: 60 }, t0);
+        s.remove(1);
+        assert_eq!(s.snapshot(t0), CmSnapshot::default());
     }
 }

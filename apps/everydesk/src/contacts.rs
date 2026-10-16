@@ -1,18 +1,36 @@
-//! Contact presence: which paired ids are online, via a signed `OnlineRequest` to hbbs
+//! Contacts: the union of the host's trust book (`pairings::book`, `pairings.json`: peers
+//! that may connect here, with the owner's policy) and the controller's contacts book
+//! (`pairings::contacts_book`, `contacts.json`: hosts that remembered us), plus their presence via a signed `OnlineRequest` to hbbs
 //! (`librustdesk::everydesk_auth::query_online_signed`).
 //!
-//! TEMPORARY SEAM (Task 5 replaces it): until the pairing book lands, the ids come from
-//! `contacts-presence-ids.json` in the config dir (a JSON array of id strings); no file,
-//! or an unreadable one, means no contacts. Task 5 should swap `paired_ids` for the
-//! pairing book and delete the file read.
+//! Commands:
+//! - `contacts_list() -> [{peer_id, name, policy: PolicyView | null, online}]` (sorted by
+//!   name, then id; `online` is the last known presence; `policy` null = a contact we only
+//!   control, not editable),
+//! - `contacts_set_policy(peer_id, policy)` (`Err` when the id is not paired),
+//! - `contacts_remove(peer_id)` (host side: engine `ui_cm_interface::revoke`, which forgets
+//!   the pairing and ends any live session of that peer here, telling it it was revoked;
+//!   controller side: dropped from the contacts book),
+//! - `contacts_presence() -> [[peer_id, online]]`.
+//!
+//! `policy` is a `PolicyView`: `{"kind":"AskAlways"}`, `{"kind":"StayConnected"}` or
+//! `{"kind":"Reconfirm","every_min":20}` (the engine `Policy` is externally tagged, which
+//! is awkward in TS).
 //!
 //! Only a successful reply changes what the app shows: a failed query (timeout, network,
 //! hbbs' rate limit) keeps the last known state. Queries are at least 6 s apart (hbbs
 //! allows one per 5 s per id); a request inside that window is answered from the last
 //! known state and the refresher is woken to query as soon as the window opens.
 
-use hbb_common::{config::Config, log, tokio};
-use serde::Serialize;
+use hbb_common::{
+    base64::{engine::general_purpose::STANDARD, Engine as _},
+    config::Config,
+    log,
+    sodiumoxide::crypto::{hash::sha256, secretbox},
+    tokio,
+};
+use librustdesk::everydesk::pairings::{book, contacts_book, Book, Pairing, Policy};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{
@@ -23,12 +41,50 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 
-const IDS_FILE: &str = "contacts-presence-ids.json";
 /// hbbs answers at most 200 peers per request.
 const MAX_IDS: usize = 200;
 /// hbbs answers one request per 5 s per id; one second of margin.
 const MIN_QUERY_INTERVAL: Duration = Duration::from_secs(6);
 const REFRESH_EVERY: Duration = Duration::from_secs(15);
+
+/// Trust policy as the UI sees it (internally tagged by `kind`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum PolicyView {
+    AskAlways,
+    StayConnected,
+    Reconfirm { every_min: u32 },
+}
+
+impl From<Policy> for PolicyView {
+    fn from(p: Policy) -> Self {
+        match p {
+            Policy::AskAlways => PolicyView::AskAlways,
+            Policy::StayConnected => PolicyView::StayConnected,
+            Policy::Reconfirm { every_min } => PolicyView::Reconfirm { every_min },
+        }
+    }
+}
+
+impl From<PolicyView> for Policy {
+    fn from(p: PolicyView) -> Self {
+        match p {
+            PolicyView::AskAlways => Policy::AskAlways,
+            PolicyView::StayConnected => Policy::StayConnected,
+            PolicyView::Reconfirm { every_min } => Policy::Reconfirm { every_min },
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ContactView {
+    pub peer_id: String,
+    pub name: String,
+    /// The policy this machine applies when `peer_id` connects here (host-side pairing,
+    /// editable); `None` for a contact we only control (shown as "—").
+    pub policy: Option<PolicyView>,
+    pub online: bool,
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 struct Presence {
@@ -49,30 +105,149 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Wakes the refresher early (a request was debounced).
 static WAKE: OnceLock<Mutex<Sender<()>>> = OnceLock::new();
 
-/// Ids from the JSON array, deduplicated, empty strings dropped, at most `MAX_IDS`.
-fn parse_ids(json: &str) -> Vec<String> {
-    let Ok(list) = serde_json::from_str::<Vec<String>>(json) else {
-        log::warn!("everydesk: {IDS_FILE} is not a JSON array of strings");
-        return vec![];
+// ---- pairing book ----------------------------------------------------------------------
+
+/// SEAM: `Book` has no way to list its entries (only `get`/`upsert`/`remove`), and the
+/// engine (`src/**`) is out of this task's scope. The ids are read from the sealed
+/// `pairings.json` / `contacts.json` that every book mutation saves (format of `pairings.rs`: JSON
+/// `{v:1, nonce, data}`, secretbox under sha256("everydesk-pairings-v1|" || sk)); each
+/// entry is then taken from the in-memory book, which stays the authority. Replace with a
+/// `Book::list()` when the engine gains one.
+const BOOK_FILE: &str = "pairings.json";
+const CONTACTS_FILE: &str = "contacts.json";
+const BOOK_KEY_CONTEXT: &[u8] = b"everydesk-pairings-v1|";
+
+#[derive(Deserialize)]
+struct Sealed {
+    v: u32,
+    nonce: String,
+    data: String,
+}
+
+fn book_file_ids(raw: &[u8], sk: &[u8]) -> Option<Vec<String>> {
+    if sk.is_empty() {
+        return None;
+    }
+    let sealed: Sealed = serde_json::from_slice(raw).ok()?;
+    if sealed.v != 1 {
+        return None;
+    }
+    let mut input = BOOK_KEY_CONTEXT.to_vec();
+    input.extend_from_slice(sk);
+    let key = secretbox::Key(sha256::hash(&input).0);
+    let nonce = secretbox::Nonce::from_slice(&STANDARD.decode(sealed.nonce).ok()?)?;
+    let plain = secretbox::open(&STANDARD.decode(sealed.data).ok()?, &nonce, &key).ok()?;
+    let list: Vec<Pairing> = serde_json::from_slice(&plain).ok()?;
+    Some(list.into_iter().map(|p| p.peer_id).collect())
+}
+
+/// Every entry of `book`, whose sealed file is `file`.
+fn entries(book: &std::sync::Mutex<Book>, file: &str) -> Vec<Pairing> {
+    let ids = match std::fs::read(Config::path(file)) {
+        Ok(raw) => book_file_ids(&raw, &Config::get_key_pair().0).unwrap_or_else(|| {
+            log::warn!("everydesk: {file} is not readable, its contacts are not listed");
+            vec![]
+        }),
+        Err(_) => vec![],
     };
-    let mut out: Vec<String> = Vec::new();
-    for id in list.into_iter().map(|s| s.trim().to_owned()) {
-        if !id.is_empty() && !out.contains(&id) {
-            out.push(id);
-        }
-    }
-    if out.len() > MAX_IDS {
-        log::warn!("everydesk: {} contact ids, querying the first {MAX_IDS}", out.len());
-        out.truncate(MAX_IDS);
-    }
+    let book = book.lock().unwrap_or_else(|e| e.into_inner());
+    ids.iter().filter_map(|id| book.get(id).cloned()).collect()
+}
+
+/// Host-side pairings (policy editable) and controller-side contacts (policy `None`).
+fn pairings() -> Vec<(Pairing, bool)> {
+    let mut out: Vec<(Pairing, bool)> =
+        entries(book(), BOOK_FILE).into_iter().map(|p| (p, true)).collect();
+    out.extend(entries(contacts_book(), CONTACTS_FILE).into_iter().map(|p| (p, false)));
     out
 }
 
-fn paired_ids() -> Vec<String> {
-    match std::fs::read_to_string(Config::path(IDS_FILE)) {
-        Ok(s) => parse_ids(&s),
-        Err(_) => vec![],
+/// Ids to ask presence for: deduplicated, at most `MAX_IDS`.
+fn cap_ids(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids.dedup();
+    if ids.len() > MAX_IDS {
+        log::warn!("everydesk: {} contact ids, querying the first {MAX_IDS}", ids.len());
+        ids.truncate(MAX_IDS);
     }
+    ids
+}
+
+fn paired_ids() -> Vec<String> {
+    cap_ids(pairings().into_iter().map(|(p, _)| p.peer_id).collect())
+}
+
+/// One row per id: a peer in both books shows the host-side entry (its policy is ours).
+/// Input order matters: host-side entries first.
+fn contact_views(list: Vec<(Pairing, bool)>, known: &HashMap<String, bool>) -> Vec<ContactView> {
+    let mut out: Vec<ContactView> = Vec::new();
+    for (p, host_side) in list {
+        if out.iter().any(|c| c.peer_id == p.peer_id) {
+            continue;
+        }
+        out.push(ContactView {
+            online: known.get(&p.peer_id).copied().unwrap_or(false),
+            name: p.name,
+            policy: host_side.then(|| p.policy.into()),
+            peer_id: p.peer_id,
+        });
+    }
+    out.sort_by(|a, b| {
+        (a.name.to_lowercase(), &a.peer_id).cmp(&(b.name.to_lowercase(), &b.peer_id))
+    });
+    out
+}
+
+/// Both books' contacts with their last known presence.
+#[tauri::command]
+pub async fn contacts_list() -> Vec<ContactView> {
+    // Off the main thread: STATE is held for a whole presence query (up to ~3 s).
+    tauri::async_runtime::spawn_blocking(|| {
+        let list = pairings();
+        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let empty = HashMap::new();
+        let known = guard.as_ref().map_or(&empty, |st| &st.known);
+        contact_views(list, known)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn contacts_set_policy(peer_id: String, policy: PolicyView) -> Result<(), String> {
+    let mut book = book().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut p) = book.get(&peer_id).cloned() else {
+        return Err(format!("contato {peer_id} não encontrado"));
+    };
+    p.policy = policy.into();
+    book.upsert(p);
+    book.save().map_err(|e| {
+        log::error!("everydesk: cannot save policy for {peer_id}: {e}");
+        format!("não foi possível salvar: {e}")
+    })?;
+    log::info!("everydesk: contact {peer_id} policy -> {policy:?}");
+    Ok(())
+}
+
+/// Forgets `peer_id` in both books. Host side goes through the engine revoke (removes it
+/// from the book, saves, and ends a live session of that peer here with a revoke notice);
+/// controller side is only dropped locally (the host keeps its own decision).
+#[tauri::command]
+pub fn contacts_remove(peer_id: String) -> Result<(), String> {
+    log::info!("everydesk: contact {peer_id} removed");
+    let host_side = book().lock().unwrap_or_else(|e| e.into_inner()).get(&peer_id).is_some();
+    if host_side {
+        librustdesk::ui_cm_interface::revoke(&peer_id);
+    }
+    let mut contacts = contacts_book().lock().unwrap_or_else(|e| e.into_inner());
+    if contacts.get(&peer_id).is_some() {
+        contacts.remove(&peer_id);
+        contacts.save().map_err(|e| {
+            log::error!("everydesk: cannot save contacts after removing {peer_id}: {e}");
+            format!("não foi possível salvar: {e}")
+        })?;
+    }
+    Ok(())
 }
 
 /// Last known state of `ids`, in list order; an id never answered yet is offline.
@@ -214,17 +389,6 @@ fn refresher(app: AppHandle, rx: Receiver<()>) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn ids_file_parsing() {
-        assert_eq!(parse_ids(r#"["a-b-c", " d ", "", "a-b-c"]"#), ["a-b-c", "d"]);
-        assert!(parse_ids("not json").is_empty());
-        assert!(parse_ids(r#"{"ids": ["x"]}"#).is_empty());
-        let many: Vec<String> = (0..250).map(|i| format!("id{i}")).collect();
-        let parsed = parse_ids(&serde_json::to_string(&many).unwrap());
-        assert_eq!(parsed.len(), MAX_IDS);
-        assert_eq!(parsed[0], "id0");
-    }
-
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
@@ -268,5 +432,112 @@ mod tests {
                 {"peer_id": "b", "online": false}
             ])
         );
+    }
+
+    #[test]
+    fn policy_view_maps_every_variant() {
+        let all = [
+            (Policy::AskAlways, PolicyView::AskAlways, r#"{"kind":"AskAlways"}"#),
+            (Policy::StayConnected, PolicyView::StayConnected, r#"{"kind":"StayConnected"}"#),
+            (
+                Policy::Reconfirm { every_min: 20 },
+                PolicyView::Reconfirm { every_min: 20 },
+                r#"{"kind":"Reconfirm","every_min":20}"#,
+            ),
+        ];
+        for (engine, view, json) in all {
+            assert_eq!(PolicyView::from(engine), view);
+            assert_eq!(Policy::from(view), engine);
+            assert_eq!(serde_json::to_string(&view).unwrap(), json);
+            assert_eq!(serde_json::from_str::<PolicyView>(json).unwrap(), view);
+        }
+        assert!(serde_json::from_str::<PolicyView>(r#"{"kind":"Reconfirm"}"#).is_err());
+        assert!(serde_json::from_str::<PolicyView>(r#""AskAlways""#).is_err());
+    }
+
+    #[test]
+    fn contact_view_roundtrip() {
+        let c = ContactView {
+            peer_id: "abc-def-ghi".into(),
+            name: "Notebook".into(),
+            policy: Some(PolicyView::Reconfirm { every_min: 45 }),
+            online: true,
+        };
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "peer_id": "abc-def-ghi",
+                "name": "Notebook",
+                "policy": {"kind": "Reconfirm", "every_min": 45},
+                "online": true
+            })
+        );
+        assert_eq!(serde_json::from_value::<ContactView>(json).unwrap(), c);
+        let only_controlled = ContactView { policy: None, online: false, ..c };
+        let json = serde_json::to_value(&only_controlled).unwrap();
+        assert_eq!(json["policy"], serde_json::Value::Null);
+        assert_eq!(serde_json::from_value::<ContactView>(json).unwrap(), only_controlled);
+    }
+
+    fn pairing(id: &str, name: &str, policy: Policy) -> Pairing {
+        Pairing {
+            peer_id: id.into(),
+            pk: [7; 32],
+            name: name.into(),
+            avatar: None,
+            policy,
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn contact_views_sorted_with_presence() {
+        let mut known = HashMap::new();
+        known.insert("b".to_owned(), true);
+        let v = contact_views(
+            vec![
+                (pairing("b", "zeca", Policy::StayConnected), true),
+                (pairing("a", "Ana", Policy::AskAlways), false),
+                (pairing("b", "zeca (contato)", Policy::AskAlways), false),
+            ],
+            &known,
+        );
+        assert_eq!(v.iter().map(|c| c.peer_id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(!v[0].online && v[1].online);
+        // controller-only contact: no policy; in both books: the host-side entry wins
+        assert_eq!(v[0].policy, None);
+        assert_eq!(v[1].policy, Some(PolicyView::StayConnected));
+        assert_eq!(v[1].name, "zeca");
+    }
+
+    #[test]
+    fn cap_ids_dedups_and_caps() {
+        assert_eq!(cap_ids(ids(&["b", "a", "b"])), ["a", "b"]);
+        let many: Vec<String> = (0..250).map(|i| format!("id{i:03}")).collect();
+        assert_eq!(cap_ids(many).len(), MAX_IDS);
+    }
+
+    /// Mirrors `pairings.rs`' sealing, so a format drift in the engine shows up here.
+    #[test]
+    fn book_file_ids_reads_the_sealed_book() {
+        use hbb_common::sodiumoxide::crypto::sign;
+        let (_, sk) = sign::gen_keypair();
+        let mut input = BOOK_KEY_CONTEXT.to_vec();
+        input.extend_from_slice(&sk.0);
+        let key = secretbox::Key(sha256::hash(&input).0);
+        let nonce = secretbox::gen_nonce();
+        let plain = serde_json::to_vec(&vec![pairing("x", "n", Policy::AskAlways)]).unwrap();
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "v": 1,
+            "nonce": STANDARD.encode(nonce.0),
+            "data": STANDARD.encode(secretbox::seal(&plain, &nonce, &key)),
+        }))
+        .unwrap();
+        assert_eq!(book_file_ids(&raw, &sk.0), Some(vec!["x".to_owned()]));
+        let (_, other) = sign::gen_keypair();
+        assert_eq!(book_file_ids(&raw, &other.0), None);
+        assert_eq!(book_file_ids(b"junk", &sk.0), None);
+        assert_eq!(book_file_ids(&raw, &[]), None);
     }
 }
