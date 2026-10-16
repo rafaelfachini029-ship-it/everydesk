@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
   import { onMount } from 'svelte'
+  import IncomingCard from './lib/IncomingCard.svelte'
   import RemoteCanvas from './lib/RemoteCanvas.svelte'
   import type { MsgBox } from './lib/session'
 
@@ -56,6 +57,7 @@
     {#if lastError}<p class="error">{lastError}</p>{/if}
   </main>
 {/if}
+<IncomingCard />
 
 <style>
   .error {

@@ -1,3 +1,4 @@
+mod cm;
 mod commands;
 mod server;
 mod session;
@@ -34,17 +35,24 @@ fn get_server_status() -> String {
 pub fn run() {
     hbb_common::init_log(false, "everydesk");
     server::apply_server_config();
+    cm::default_approve_mode();
     log::info!(
         "everydesk: server={} id={}",
         server::EVERYDESK_SERVER,
         Config::get_id()
     );
-    // As the Sciter GUI did in core_main: reuse a running `--server` over IPC,
-    // otherwise start the host (IPC + rendezvous registration) in this process.
-    std::thread::spawn(|| librustdesk::start_server(false, false));
     librustdesk::ui_interface::start_option_status_sync();
 
     tauri::Builder::default()
+        .setup(|app| {
+            // `_cm` first, so the host's first login finds it (`try_start_cm`) and the
+            // engine never spawns a `--cm` window.
+            cm::start(app.handle().clone());
+            // As the Sciter GUI did in core_main: reuse a running `--server` over IPC,
+            // otherwise start the host (IPC + rendezvous registration) in this process.
+            std::thread::spawn(|| librustdesk::start_server(false, false));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_my_id,
             get_server_status,
@@ -55,6 +63,8 @@ pub fn run() {
             commands::session_key,
             commands::session_switch_display,
             commands::session_frame_ack,
+            cm::cm_authorize,
+            cm::cm_close,
         ])
         .build(tauri::generate_context!())
         .expect("error while running EveryDesk")

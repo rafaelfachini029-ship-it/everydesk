@@ -875,6 +875,8 @@ pub async fn start_ipc<T: InvokeUiCM>(cm: ConnectionManager<T>) {
             log::error!("Failed to start cm ipc server: {}", err);
         }
     }
+    // EveryDesk serves `_cm` from the app process: losing the listener must not quit the app.
+    #[cfg(not(feature = "everydesk"))]
     quit_cm();
 }
 

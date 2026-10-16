@@ -66,7 +66,11 @@ mod whiteboard;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod updater;
 
+#[cfg(not(feature = "everydesk"))]
 mod ui_cm_interface;
+// EveryDesk: the Tauri app is the connection manager (accept/deny prompt).
+#[cfg(feature = "everydesk")]
+pub mod ui_cm_interface;
 #[cfg(not(feature = "everydesk"))]
 mod ui_interface;
 // EveryDesk: the Tauri app reads the host status the same way the Sciter UI did.

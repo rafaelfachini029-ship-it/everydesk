@@ -85,6 +85,10 @@ const ID_WHITELIST_FAILURE_DECAY_MINUTES: i32 = 10;
 /// credential prompt still unanswered. The controller reconnects on its own and the prompt
 /// comes back. A connection that says nothing at all goes at the 30 s idle timeout already.
 const LOGIN_GRACE: Duration = Duration::from_secs(180);
+/// EveryDesk: in click-approve mode the accept prompt is answered within this long, or the
+/// controller is told `LOGIN_MSG_TIMEOUT` and the connection closes. Password logins keep
+/// `LOGIN_GRACE`.
+const CLICK_APPROVE_TIMEOUT_SECS: u64 = 60;
 /// Connections between accept and authorization, across every transport: the resource bound.
 /// At this many a further arrival is refused and the oldest is told to go, one at a time.
 const MAX_UNAUTHORIZED_CONNS: usize = 64;
@@ -181,6 +185,20 @@ async fn login_deadline(authorized: bool, started: Instant) {
         return std::future::pending().await;
     }
     time::sleep_until(started + LOGIN_GRACE).await
+}
+
+/// The instant a click-approve prompt shown at `prompted` expires.
+fn click_approve_deadline_at(prompted: Instant) -> Instant {
+    prompted + Duration::from_secs(CLICK_APPROVE_TIMEOUT_SECS)
+}
+
+/// Resolves when the click-approve prompt shown at `prompted` expires; never when no prompt
+/// is pending or the connection has authorized.
+async fn click_approve_deadline(authorized: bool, prompted: Option<Instant>) {
+    match prompted {
+        Some(p) if !authorized => time::sleep_until(click_approve_deadline_at(p)).await,
+        _ => std::future::pending().await,
+    }
 }
 
 lazy_static::lazy_static! {
@@ -372,6 +390,8 @@ pub struct Connection {
     authorized: bool,
     // The place among the unauthorized connections; given back at authorization.
     unauthorized_id: Option<UnauthorizedID>,
+    // When the click-approve prompt went to the CM; see CLICK_APPROVE_TIMEOUT_SECS.
+    click_approve_prompted: Option<Instant>,
     require_2fa: Option<totp_rs::TOTP>,
     awaiting_2fa: bool,
     keyboard: bool,
@@ -587,6 +607,7 @@ impl Connection {
             tx_to_cm,
             authorized: false,
             unauthorized_id: Some(unauthorized),
+            click_approve_prompted: None,
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
             clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
             audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
@@ -744,6 +765,11 @@ impl Connection {
                 }
                 _ = login_deadline(conn.authorized, started) => {
                     conn.on_close("Timeout", true).await;
+                    break;
+                }
+                _ = click_approve_deadline(conn.authorized, conn.click_approve_prompted) => {
+                    conn.send_login_error(crate::client::LOGIN_MSG_TIMEOUT).await;
+                    conn.on_close("Click approve timeout", true).await;
                     break;
                 }
                 Some(data) = rx_from_cm.recv() => {
@@ -3002,6 +3028,9 @@ impl Connection {
                     }
                 }
                 self.try_start_cm(lr.my_id, lr.my_name, false);
+                if self.click_approve_prompted.is_none() {
+                    self.click_approve_prompted = Some(Instant::now());
+                }
                 if hbb_common::get_version_number(&lr.version)
                     >= hbb_common::get_version_number("1.2.0")
                 {
@@ -6321,6 +6350,19 @@ async fn start_ipc(
     if let Ok(s) = crate::ipc::connect(1000, "_cm").await {
         stream = Some(s);
     }
+    // EveryDesk: the app process itself serves `_cm` (apps/everydesk/src/cm.rs); a `--cm`
+    // child would be a second app window. Wait for it instead of spawning one.
+    #[cfg(feature = "everydesk")]
+    if stream.is_none() {
+        for _ in 0..20 {
+            sleep(0.3).await;
+            if let Ok(s) = crate::ipc::connect(1000, "_cm").await {
+                stream = Some(s);
+                break;
+            }
+        }
+    }
+    #[cfg(not(feature = "everydesk"))]
     if stream.is_none() {
         let args = vec!["--cm"];
         let run_done;
@@ -7123,6 +7165,14 @@ mod test {
 
     fn unauthorized_count() -> usize {
         UNAUTHORIZED_CONNS.lock().unwrap().len()
+    }
+
+    #[test]
+    fn test_click_approve_deadline_is_60s() {
+        let t = Instant::now();
+        assert_eq!(click_approve_deadline_at(t) - t, Duration::from_secs(60));
+        assert!(Duration::from_secs(CLICK_APPROVE_TIMEOUT_SECS) < LOGIN_GRACE);
+        assert_eq!(crate::client::LOGIN_MSG_TIMEOUT, "Pedido não respondido em 60 s");
     }
 
     #[test]
