@@ -205,21 +205,6 @@ async fn click_approve_deadline(authorized: bool, prompted: Option<Instant>) {
     std::future::pending().await
 }
 
-/// Resolves at `at`; never when `None`. EveryDesk: when the next reconfirmation of a
-/// `Policy::Reconfirm` contact is due (`Connection::reconfirm_due_at`, `None` in stock builds).
-async fn reconfirm_due(at: Option<Instant>) {
-    match at {
-        Some(at) => time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
-/// Resolves at `at`; never when `None`. EveryDesk: when the pending reconfirmation ring runs
-/// out (`Connection::reconfirm_expires_at`, `None` in stock builds).
-async fn reconfirm_expired(at: Option<Instant>) {
-    reconfirm_due(at).await
-}
-
 lazy_static::lazy_static! {
     // Connections between accept and authorization, oldest first; see admit_unauthorized.
     static ref UNAUTHORIZED_CONNS: Mutex<Vec<(i32, IpAddr, Arc<UnauthorizedShared>)>> = Default::default();
@@ -813,15 +798,6 @@ impl Connection {
                     conn.on_close("Click approve timeout", true).await;
                     break;
                 }
-                // EveryDesk reconfirmation: ask the owner (the stream is untouched), and end the
-                // session when the ring runs out. Both are pending forever in stock builds.
-                _ = reconfirm_due(conn.reconfirm_due_at()) => {
-                    conn.ask_reconfirm();
-                }
-                _ = reconfirm_expired(conn.reconfirm_expires_at()) => {
-                    conn.close_reconfirm_timeout().await;
-                    break;
-                }
                 Some(data) = rx_from_cm.recv() => {
                     match data {
                         ipc::Data::Authorize => {
@@ -845,11 +821,12 @@ impl Connection {
                         // offered "Aceitar e lembrar". Authorizes exactly as `Authorize`; with
                         // `accepted` it also remembers the controller under `policy`.
                         #[cfg(feature = "everydesk")]
-                        ipc::Data::PairAck { conn_id: _, accepted, policy } => {
+                        ipc::Data::PairAck { conn_id: _, accepted, policy, replace_key } => {
                             if conn.authorized {
                                 continue;
                             }
-                            let remembered = accepted && conn.remember_controller(policy);
+                            let remembered =
+                                accepted && conn.remember_controller(policy, replace_key);
                             conn.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
                             conn.require_2fa.take();
                             if !conn.send_logon_response_and_keep_alive().await {
@@ -1282,6 +1259,12 @@ impl Connection {
                     }
                 }
                 _ = second_timer.tick() => {
+                    // EveryDesk reconfirmation, at 1 s resolution: ask the owner when due (the
+                    // stream is untouched) and end the session when the ring runs out.
+                    #[cfg(feature = "everydesk")]
+                    if !conn.reconfirm_tick().await {
+                        break;
+                    }
                     #[cfg(windows)]
                     conn.portable_check();
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
@@ -1473,6 +1456,11 @@ impl Connection {
                             ipc::Data::CmErr(e) => {
                                 log::error!("Connection manager error: {e}");
                                 bail!("{e}");
+                            }
+                            // EveryDesk: a revoked pairing ends its tunnel too.
+                            #[cfg(feature = "everydesk")]
+                            ipc::Data::Revoke { peer_id } if peer_id == self.lr.my_id => {
+                                bail!("Pairing revoked by the owner");
                             }
                             _ => {}
                         }
@@ -5450,59 +5438,6 @@ impl Connection {
         }
     }
 
-    /// EveryDesk: when the next reconfirmation is due; always `None` in stock builds.
-    fn reconfirm_due_at(&self) -> Option<Instant> {
-        #[cfg(feature = "everydesk")]
-        return self.reconfirm.and_then(|r| r.due_at());
-        #[cfg(not(feature = "everydesk"))]
-        None
-    }
-
-    /// EveryDesk: when the pending reconfirmation ring runs out; always `None` in stock builds.
-    fn reconfirm_expires_at(&self) -> Option<Instant> {
-        #[cfg(feature = "everydesk")]
-        return self.reconfirm.and_then(|r| r.expires_at());
-        #[cfg(not(feature = "everydesk"))]
-        None
-    }
-
-    /// EveryDesk: show the owner the reconfirmation ring. Only the CM is told; the session
-    /// keeps streaming. Not yet authorized (2FA pending): try again a period later.
-    fn ask_reconfirm(&mut self) {
-        #[cfg(feature = "everydesk")]
-        {
-            use crate::everydesk::reconfirm::{Transition, RECONFIRM_RING_SECS};
-            let Some(r) = self.reconfirm.as_mut() else {
-                return;
-            };
-            let now = Instant::now();
-            if !self.authorized {
-                r.apply(Transition::Continue {
-                    next_at: now + r.every,
-                });
-                return;
-            }
-            r.ask(now);
-            log::info!("everydesk: reconfirmation asked for {}", self.lr.my_id);
-            self.send_to_cm(ipc::Data::Reconfirm {
-                conn_id: self.inner.id(),
-                ring_secs: RECONFIRM_RING_SECS as u32,
-            });
-        }
-    }
-
-    /// EveryDesk: the reconfirmation ring ran out unanswered.
-    async fn close_reconfirm_timeout(&mut self) {
-        #[cfg(feature = "everydesk")]
-        {
-            log::info!("everydesk: reconfirmation for {} timed out", self.lr.my_id);
-            self.reconfirm = None;
-            self.send_close_reason_no_retry(crate::client::LOGIN_MSG_RECONFIRM_TIMEOUT)
-                .await;
-            self.on_close("reconfirmation timeout", true).await;
-        }
-    }
-
     // The `reason` should be consistent with `check_if_retry` if not empty
     async fn send_close_reason_no_retry(&mut self, reason: &str) {
         let mut misc = Misc::new();
@@ -5515,6 +5450,49 @@ impl Connection {
         msg_out.set_misc(misc);
         self.send(msg_out).await;
         raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
+    }
+
+    /// EveryDesk, every second: shows the owner the reconfirmation ring when due (only the CM is
+    /// told; the session keeps streaming; not yet authorized, e.g. 2FA pending: try again a
+    /// period later), and ends the session when the ring ran out. False when it ended.
+    #[cfg(feature = "everydesk")]
+    async fn reconfirm_tick(&mut self) -> bool {
+        use crate::everydesk::reconfirm::{Transition, RECONFIRM_RING_SECS};
+        let now = Instant::now();
+        let Some(r) = self.reconfirm.as_mut() else {
+            return true;
+        };
+        if r.expires_at().map_or(false, |at| now >= at) {
+            log::info!("everydesk: reconfirmation for {} timed out", self.lr.my_id);
+            self.reconfirm = None;
+            self.send_close_reason_no_retry(crate::client::LOGIN_MSG_RECONFIRM_TIMEOUT)
+                .await;
+            self.on_close("reconfirmation timeout", true).await;
+            return false;
+        }
+        if r.due_at().map_or(false, |at| now >= at) {
+            if !self.authorized {
+                r.apply(Transition::Continue {
+                    next_at: now + r.every,
+                });
+                return true;
+            }
+            r.ask(now);
+            log::info!("everydesk: reconfirmation asked for {}", self.lr.my_id);
+            self.send_to_cm(ipc::Data::Reconfirm {
+                conn_id: self.inner.id(),
+                ring_secs: RECONFIRM_RING_SECS as u32,
+            });
+        }
+        true
+    }
+
+    /// EveryDesk: only a screen session (no file transfer, camera, terminal or tunnel) may log
+    /// in by policy or be reconfirmed; the others always get the accept card, since a tunnel
+    /// leaves the loop that runs reconfirmation.
+    #[cfg(feature = "everydesk")]
+    fn is_screen_session(&self) -> bool {
+        self.lr.union.is_none()
     }
 
     /// EveryDesk: the owner's stored policy for this login, or `AskAlways` when the controller
@@ -5542,6 +5520,13 @@ impl Connection {
             Policy::StayConnected => None,
             Policy::Reconfirm { every_min } => Some(every_min),
         };
+        if !self.is_screen_session() {
+            log::info!(
+                "everydesk: {} is paired, but only screen sessions skip the accept card",
+                peer_id
+            );
+            return None;
+        }
         log::info!(
             "everydesk: paired contact {} logged in by policy ({})",
             peer_id,
@@ -5565,21 +5550,31 @@ impl Connection {
     #[cfg(feature = "everydesk")]
     fn pair_offer(&mut self, peer_id: &str, name: &str, avatar: &str) -> Option<ipc::Data> {
         self.pair_offered = self.controller_pk;
-        self.pair_offered?;
+        let pk = self.pair_offered?;
+        let key_changed = crate::everydesk::pairings::book()
+            .lock()
+            .unwrap()
+            .key_changed(peer_id, &pk);
+        if key_changed {
+            log::warn!("everydesk: {} is paired under another key", peer_id);
+        }
         Some(ipc::Data::PairOffer {
             conn_id: self.inner.id(),
             peer_id: peer_id.to_owned(),
             name: name.to_owned(),
             avatar: (!avatar.is_empty()).then(|| avatar.as_bytes().to_vec()),
+            key_changed,
         })
     }
 
     /// EveryDesk: stores the controller offered with the accept card under `policy`. Only the
-    /// key that was offered AND is still the verified one is stored. True when stored.
+    /// key that was offered AND is still the verified one is stored, and an id pinned to
+    /// another key keeps its pin unless `replace_key`. True when stored.
     #[cfg(feature = "everydesk")]
     fn remember_controller(
         &mut self,
         policy: Option<crate::everydesk::pairings::Policy>,
+        replace_key: bool,
     ) -> bool {
         use crate::everydesk::{
             pairings::{book, Pairing, Policy},
@@ -5603,21 +5598,32 @@ impl Connection {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or_default()
             });
-            book.upsert(Pairing {
-                peer_id: peer_id.clone(),
-                pk,
-                name: self.lr.my_name.clone(),
-                avatar: (!self.lr.avatar.is_empty()).then(|| self.lr.avatar.as_bytes().to_vec()),
-                policy,
-                created_at,
-            });
+            let stored = book.remember(
+                Pairing {
+                    peer_id: peer_id.clone(),
+                    pk,
+                    name: self.lr.my_name.clone(),
+                    avatar: (!self.lr.avatar.is_empty())
+                        .then(|| self.lr.avatar.as_bytes().to_vec()),
+                    policy,
+                    created_at,
+                },
+                replace_key,
+            );
+            if !stored {
+                log::warn!(
+                    "everydesk: {} is pinned to another key; not re-pinned without replace_key",
+                    peer_id
+                );
+                return false;
+            }
             if let Err(e) = book.save() {
                 log::error!("pairings: cannot save {}: {}", peer_id, e);
             }
         }
         log::info!("everydesk: paired with {} ({:?})", peer_id, policy);
-        // The owner chose to reconfirm: this session follows it from now on.
-        if let Policy::Reconfirm { every_min } = policy {
+        // The owner chose to reconfirm: this (screen) session follows it from now on.
+        if let (Policy::Reconfirm { every_min }, true) = (policy, self.is_screen_session()) {
             self.reconfirm = Some(ReconfirmState::new(Instant::now(), every_min));
         }
         true

@@ -96,6 +96,27 @@ impl Book {
         Ok(())
     }
 
+    /// A book of this machine's at `path` (same encryption as `pairings.json`).
+    pub fn load_at(path: &Path) -> Book {
+        let (sk, _) = Config::get_key_pair();
+        Self::load_from(path, &sk)
+    }
+
+    /// `peer_id` is paired, but under another key than `pk`.
+    pub fn key_changed(&self, peer_id: &str, pk: &[u8; 32]) -> bool {
+        matches!(self.pairings.get(peer_id), Some(p) if !pk_eq(&p.pk, pk))
+    }
+
+    /// Stores `p`, except that a peer already pinned to another key keeps its pin unless
+    /// `replace_key` (the owner explicitly confirmed the key change). True when stored.
+    pub fn remember(&mut self, p: Pairing, replace_key: bool) -> bool {
+        if self.key_changed(&p.peer_id, &p.pk) && !replace_key {
+            return false;
+        }
+        self.upsert(p);
+        true
+    }
+
     pub fn get(&self, peer_id: &str) -> Option<&Pairing> {
         self.pairings.get(peer_id)
     }
@@ -119,6 +140,9 @@ impl Book {
 }
 
 const FILE_NAME: &str = "pairings.json";
+/// Controller side: the hosts that remembered us, for the contacts list only. Kept apart from
+/// `pairings.json` so nothing a peer sends can change the owner's trust decisions.
+const CONTACTS_FILE_NAME: &str = "contacts.json";
 const KEY_CONTEXT: &[u8] = b"everydesk-pairings-v1|";
 
 #[derive(Serialize, Deserialize)]
@@ -163,9 +187,55 @@ fn pk_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     hbb_common::sodiumoxide::utils::memcmp(a, b)
 }
 
+/// This machine's trust book (`pairings.json`): the owner's decisions about who may connect.
+/// Written only by the host on the owner's answers (accept card, revoke).
 pub fn book() -> &'static Mutex<Book> {
     static BOOK: OnceLock<Mutex<Book>> = OnceLock::new();
     BOOK.get_or_init(|| Mutex::new(Book::load()))
+}
+
+/// The hosts that remembered this machine (`contacts.json`), fed by wire messages from those
+/// hosts; for the contacts list only, never consulted for authorization.
+pub fn contacts_book() -> &'static Mutex<Book> {
+    static CONTACTS: OnceLock<Mutex<Book>> = OnceLock::new();
+    CONTACTS.get_or_init(|| Mutex::new(Book::load_at(&Config::path(CONTACTS_FILE_NAME))))
+}
+
+/// What a host told us over the wire (`Misc.everydesk`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireEvent {
+    /// The host remembered us; `sign_pk` is the host key this session verified.
+    PairAccepted {
+        sign_pk: [u8; 32],
+        name: String,
+    },
+    Revoked,
+}
+
+/// Controller side: applies a host's wire message to the contacts book. True when changed.
+pub fn apply_wire_to_contacts(contacts: &mut Book, peer_id: &str, ev: WireEvent, now: i64) -> bool {
+    match ev {
+        WireEvent::PairAccepted { sign_pk, name } => {
+            let existing = contacts.get(peer_id).cloned();
+            contacts.upsert(Pairing {
+                peer_id: peer_id.to_owned(),
+                pk: sign_pk,
+                name,
+                avatar: existing.as_ref().and_then(|p| p.avatar.clone()),
+                // Placeholder: the contacts book only lists contacts.
+                policy: Policy::AskAlways,
+                created_at: existing.map(|p| p.created_at).unwrap_or(now),
+            });
+            true
+        }
+        WireEvent::Revoked => {
+            if contacts.get(peer_id).is_none() {
+                return false;
+            }
+            contacts.remove(peer_id);
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +279,80 @@ mod tests {
         book.remove("123456789");
         assert_eq!(book.policy_for("123456789", &a), Policy::AskAlways);
         assert!(book.get("123456789").is_none());
+    }
+
+    #[test]
+    fn remember_refuses_key_change_without_flag() {
+        let (_, sk) = sign::gen_keypair();
+        let mut book = Book::load_from(&temp_path("keychange"), &sk.0);
+        let a = [0xAA; 32];
+        let b = [0xBB; 32];
+        assert!(!book.key_changed("123456789", &a));
+        assert!(book.remember(pairing("123456789", a, Policy::StayConnected), false));
+        assert!(!book.key_changed("123456789", &a));
+        assert!(book.key_changed("123456789", &b));
+        // An impostor accepted once from the card must not take over the pin.
+        assert!(!book.remember(pairing("123456789", b, Policy::StayConnected), false));
+        assert_eq!(book.get("123456789").unwrap().pk, a);
+        assert_eq!(book.policy_for("123456789", &b), Policy::AskAlways);
+        // Same key: an update (policy change) is fine.
+        assert!(book.remember(pairing("123456789", a, Policy::AskAlways), false));
+        assert_eq!(book.policy_for("123456789", &a), Policy::AskAlways);
+    }
+
+    #[test]
+    fn remember_replaces_key_with_flag() {
+        let (_, sk) = sign::gen_keypair();
+        let mut book = Book::load_from(&temp_path("keyreplace"), &sk.0);
+        let a = [0xAA; 32];
+        let b = [0xBB; 32];
+        book.upsert(pairing("123456789", a, Policy::StayConnected));
+        assert!(book.remember(pairing("123456789", b, Policy::StayConnected), true));
+        assert_eq!(book.policy_for("123456789", &b), Policy::StayConnected);
+        assert_eq!(book.policy_for("123456789", &a), Policy::AskAlways);
+    }
+
+    #[test]
+    fn wire_pairack_does_not_touch_host_book() {
+        assert_ne!(FILE_NAME, CONTACTS_FILE_NAME);
+        let (_, sk) = sign::gen_keypair();
+        let host_path = temp_path("wire-host");
+        let contacts_path = temp_path("wire-contacts");
+        let mut host = Book::load_from(&host_path, &sk.0);
+        let owner = pairing("123456789", [0xAA; 32], Policy::StayConnected);
+        host.upsert(owner.clone());
+        host.save().unwrap();
+
+        let mut contacts = Book::load_from(&contacts_path, &sk.0);
+        let ack = WireEvent::PairAccepted {
+            sign_pk: [0xCC; 32],
+            name: "Servidor".to_owned(),
+        };
+        assert!(apply_wire_to_contacts(&mut contacts, "123456789", ack, 7));
+        assert_eq!(contacts.get("123456789").unwrap().pk, [0xCC; 32]);
+        assert_eq!(contacts.get("123456789").unwrap().policy, Policy::AskAlways);
+        contacts.save().unwrap();
+        assert!(apply_wire_to_contacts(
+            &mut contacts,
+            "123456789",
+            WireEvent::Revoked,
+            8
+        ));
+        assert!(!apply_wire_to_contacts(
+            &mut contacts,
+            "123456789",
+            WireEvent::Revoked,
+            9
+        ));
+        contacts.save().unwrap();
+
+        // The owner's decision about 123456789 is untouched on disk.
+        let host = Book::load_from(&host_path, &sk.0);
+        assert_eq!(host.get("123456789"), Some(&owner));
+        assert_eq!(
+            host.policy_for("123456789", &[0xAA; 32]),
+            Policy::StayConnected
+        );
     }
 
     #[test]

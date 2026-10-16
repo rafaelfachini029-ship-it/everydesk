@@ -422,14 +422,19 @@ pub enum Data {
         peer_id: String,
         name: String,
         avatar: Option<Vec<u8>>,
+        /// `peer_id` is already paired under ANOTHER key: show "a chave desta máquina mudou";
+        /// remembering then needs `PairAck.replace_key`.
+        key_changed: bool,
     },
     /// EveryDesk, CM -> connection: accept the pending login; with `accepted` also remember
-    /// the controller under `policy` (deny is `Close`).
+    /// the controller under `policy` (deny is `Close`). A peer pinned to another key is only
+    /// re-pinned with `replace_key` (the owner confirmed the key change).
     #[cfg(feature = "everydesk")]
     PairAck {
         conn_id: i32,
         accepted: bool,
         policy: Option<crate::everydesk::pairings::Policy>,
+        replace_key: bool,
     },
     /// EveryDesk, CM -> connection: the owner revoked this peer's pairing; end its session.
     #[cfg(feature = "everydesk")]

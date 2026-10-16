@@ -1524,12 +1524,12 @@ impl<T: InvokeUiSession> Remote<T> {
         return false;
     }
 
-    /// EveryDesk: the host accepted and remembered us (record it in our own book, used for the
-    /// contacts list only, keyed to the host key this session's handshake proved), or revoked
-    /// our pairing (forget it).
+    /// EveryDesk: the host accepted and remembered us (list it in our contacts, keyed to the
+    /// host key this session's handshake proved), or revoked our pairing (drop it). Only the
+    /// contacts book is touched: nothing a peer sends reaches our own trust book.
     #[cfg(feature = "everydesk")]
     fn handle_everydesk(&mut self, m: EveryDeskMsg) {
-        use crate::everydesk::pairings::{book, Pairing, Policy};
+        use crate::everydesk::pairings::{apply_wire_to_contacts, contacts_book, WireEvent};
         let (peer_id, host, name) = {
             let lc = self.handler.lc.read().unwrap();
             let name = lc
@@ -1540,43 +1540,31 @@ impl<T: InvokeUiSession> Remote<T> {
                 .unwrap_or_else(|| lc.id.clone());
             (lc.id.clone(), lc.everydesk_host, name)
         };
-        let mut book = book().lock().unwrap();
-        match m.union {
+        let ev = match m.union {
             Some(every_desk_msg::Union::PairAck(ack)) if ack.accepted => {
                 // Only a host whose identity this session verified, and only once we signed.
                 let Some(host) = host else {
                     log::warn!("everydesk: pair ack from unverified host {}, ignored", peer_id);
                     return;
                 };
-                let existing = book.get(&peer_id).cloned();
-                let created_at = existing.as_ref().map(|p| p.created_at).unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or_default()
-                });
-                book.upsert(Pairing {
-                    peer_id: peer_id.clone(),
-                    pk: host.sign_pk,
+                WireEvent::PairAccepted {
+                    sign_pk: host.sign_pk,
                     name,
-                    avatar: existing.and_then(|p| p.avatar),
-                    // Placeholder: the controller's book only lists contacts.
-                    policy: Policy::AskAlways,
-                    created_at,
-                });
-                log::info!("everydesk: {} remembered us", peer_id);
-            }
-            Some(every_desk_msg::Union::Revoke(_)) => {
-                if book.get(&peer_id).is_none() {
-                    return;
                 }
-                book.remove(&peer_id);
-                log::info!("everydesk: {} revoked our pairing", peer_id);
             }
+            Some(every_desk_msg::Union::Revoke(_)) => WireEvent::Revoked,
             _ => return,
-        }
-        if let Err(e) = book.save() {
-            log::error!("pairings: cannot save {}: {}", peer_id, e);
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        let mut contacts = contacts_book().lock().unwrap();
+        if apply_wire_to_contacts(&mut contacts, &peer_id, ev, now) {
+            log::info!("everydesk: contacts updated from {}", peer_id);
+            if let Err(e) = contacts.save() {
+                log::error!("contacts: cannot save {}: {}", peer_id, e);
+            }
         }
     }
 

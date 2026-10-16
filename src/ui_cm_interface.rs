@@ -206,8 +206,17 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
 
     /// EveryDesk: the pending login `conn_id` comes from an authenticated controller that can
     /// be remembered; the accept card may offer "Aceitar e lembrar" (answer with `pair_ack`).
+    /// `key_changed`: this id is already paired under another key ("a chave desta máquina
+    /// mudou"); re-pinning it needs `pair_ack(.., replace_key = true)`.
     #[cfg(feature = "everydesk")]
-    fn pair_offer(&self, _conn_id: i32, _peer_id: String, _name: String, _avatar: Option<Vec<u8>>) {
+    fn pair_offer(
+        &self,
+        _conn_id: i32,
+        _peer_id: String,
+        _name: String,
+        _avatar: Option<Vec<u8>>,
+        _key_changed: bool,
+    ) {
     }
 }
 
@@ -399,15 +408,21 @@ pub fn reconfirm_result(id: i32, ok: bool) {
 }
 
 /// EveryDesk: accept the pending login `id`; with `accepted`, also remember the controller
-/// under `policy`. Deny with `close`.
+/// under `policy`; `replace_key` re-pins an id offered with `key_changed`. Deny with `close`.
 #[cfg(feature = "everydesk")]
-pub fn pair_ack(id: i32, accepted: bool, policy: Option<crate::everydesk::pairings::Policy>) {
+pub fn pair_ack(
+    id: i32,
+    accepted: bool,
+    policy: Option<crate::everydesk::pairings::Policy>,
+    replace_key: bool,
+) {
     if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
         client.authorized = true;
         allow_err!(client.tx.send(Data::PairAck {
             conn_id: id,
             accepted,
             policy,
+            replace_key,
         }));
     };
 }
@@ -643,8 +658,8 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.cm.reconfirm(self.conn_id, ring_secs);
                                 }
                                 #[cfg(feature = "everydesk")]
-                                Data::PairOffer { conn_id: _, peer_id, name, avatar } => {
-                                    self.cm.pair_offer(self.conn_id, peer_id, name, avatar);
+                                Data::PairOffer { conn_id: _, peer_id, name, avatar, key_changed } => {
+                                    self.cm.pair_offer(self.conn_id, peer_id, name, avatar, key_changed);
                                 }
                                 Data::SwitchPermission { name, enabled } => {
                                     // Keep this branch scoped to privacy mode rollback.
