@@ -12,18 +12,15 @@
     onreturn: () => void — give the keyboard back to the remote screen
 -->
 <script lang="ts">
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event'
   import { onMount, tick } from 'svelte'
   import Ellipsis from 'lucide-svelte/icons/ellipsis'
   import Eye from 'lucide-svelte/icons/eye'
   import Icon from '../ui/Icon.svelte'
   import {
-    EVENTS,
     ctrlAltDel,
     dispatchExtras,
     extras,
-    getQuality,
-    getToggles,
+    hydrateExtras,
     lockRemote,
     restartRemote,
     setQuality,
@@ -62,20 +59,15 @@
     if (!active) close()
   })
 
+  // block_input / permission events are kept by session.ts (listenExtras) from before the
+  // first frame; the panel only reads the shared store.
   onMount(() => {
-    const un: Promise<UnlistenFn>[] = [
-      listen<{ on: boolean }>(EVENTS.blockInput, (e) => dispatchExtras({ type: 'blockInput', on: e.payload.on })),
-      listen<{ name: string; value: boolean }>(EVENTS.permission, (e) =>
-        dispatchExtras({ type: 'permission', name: e.payload.name, value: e.payload.value }),
-      ),
-    ]
     const outside = (e: PointerEvent) => {
       if (open && !root.contains(e.target as Node | null)) close()
     }
     document.addEventListener('pointerdown', outside, true)
     return () => {
       document.removeEventListener('pointerdown', outside, true)
-      un.forEach((p) => p.then((f) => f()))
     }
   })
 
@@ -89,12 +81,7 @@
     if (open) return close()
     open = true
     error = null
-    try {
-      const [options, quality] = await Promise.all([getToggles(), getQuality()])
-      dispatchExtras({ type: 'hydrate', options, quality })
-    } catch (e) {
-      error = String(e)
-    }
+    await hydrateExtras()
     await tick()
     panel?.querySelector<HTMLElement>('button:not([disabled])')?.focus()
   }

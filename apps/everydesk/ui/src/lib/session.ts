@@ -3,6 +3,7 @@
 // The pure helpers carry no DOM/Tauri dependency so `node --test` can exercise them.
 
 import { Channel, invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { writable } from 'svelte/store'
 import { EMPTY as NO_JOBS, jobsReducer, type JobsAction, type JobsState } from './session/jobs.ts'
 import { EXTRAS_EMPTY, extrasReducer, type ExtrasAction, type ExtrasState, type QualityLevel } from './session/more.ts'
@@ -295,6 +296,32 @@ export const cancelJob = (id: number) => invoke('session_cancel_job', { id })
  *  Sempre = overwrite this and the rest of the job. */
 export const answerOverride = (id: number, fileNum: number, overwrite: boolean, remember: boolean) =>
   invoke('session_override_answer', { id, fileNum, overwrite, remember })
+
+/** Reads the session's stored options and quality into `extras`. Called once the session is
+ *  connected (RemoteCanvas) and again whenever the Mais panel opens. Until it lands, input is
+ *  closed (more.ts `inputAllowed`). If the read fails the session is gone or going: the state
+ *  is marked read with what is known, so a live session never stays locked. */
+export async function hydrateExtras(): Promise<void> {
+  try {
+    const [options, q] = await Promise.all([getToggles(), getQuality()])
+    dispatchExtras({ type: 'hydrate', options: options ?? {}, quality: q })
+  } catch (e) {
+    console.warn('everydesk: session options unreadable', e)
+    dispatchExtras({ type: 'hydrate', options: {} })
+  }
+}
+
+/** Session-level listeners for the panel's state (`session:block_input`,
+ *  `session:permission`), registered with the other session listeners before connecting so no
+ *  early event is lost; the store keeps the last-known values for the panel. */
+export function listenExtras(): Promise<UnlistenFn>[] {
+  return [
+    listen<{ on: boolean }>(EVENTS.blockInput, (e) => dispatchExtras({ type: 'blockInput', on: e.payload.on })),
+    listen<{ name: string; value: boolean }>(EVENTS.permission, (e) =>
+      dispatchExtras({ type: 'permission', name: e.payload.name, value: e.payload.value }),
+    ),
+  ]
+}
 
 /** Flips one option (closed list in commands.rs) and answers its new state. */
 export const toggleOption = (name: string) => invoke<boolean>('session_toggle', { name })

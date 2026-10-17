@@ -27,8 +27,9 @@
   import Pill from '../ui/Pill.svelte'
   import FileTrail from './FileTrail.svelte'
   import MorePanel from './MorePanel.svelte'
+  import { VIEW_ONLY_FILES, filesAllowed, qualityLabel } from './more.ts'
   import type { Contact } from '../policy.ts'
-  import { currentDisplay, dispatchJobs, displayList, jobs, pickAndSend, quality, switchDisplay } from '../session'
+  import { currentDisplay, dispatchJobs, displayList, extras, jobs, pickAndSend, quality, switchDisplay } from '../session'
   import { overall, trailBusy } from './jobs.ts'
   import { createHideTimer, formatFps, formatLatency, type Rect } from './sessionPill.ts'
 
@@ -48,6 +49,10 @@
   let hint = $state<string | null>(null)
 
   const latency = $derived(formatLatency($quality.delay))
+  const level = $derived(qualityLabel($extras.quality))
+  // Só olhar sends no files either (the Arquivos tool reads as unavailable)
+  const sends = $derived(filesAllowed($extras))
+  const filesHint = $derived(sends ? 'Enviar arquivos para a outra máquina' : VIEW_ONLY_FILES)
   const fps = $derived(formatFps($quality.fps))
 
   const busy = $derived(trailBusy($jobs))
@@ -197,9 +202,11 @@
         <button
           class="tool"
           aria-label="Arquivos"
-          onclick={sendSome}
-          onpointerenter={() => show('Enviar arquivos para a outra máquina')}
-          onfocus={() => show('Enviar arquivos para a outra máquina')}
+          aria-disabled={sends ? undefined : 'true'}
+          aria-describedby={sends ? undefined : `${uid}-look`}
+          onclick={() => (sends ? sendSome() : onreturn())}
+          onpointerenter={() => show(filesHint)}
+          onfocus={() => show(filesHint)}
           onpointerleave={() => show(null)}
         >
           <Icon icon={FileUp} />
@@ -207,9 +214,9 @@
 
         <span class="quality">
           <span class="glyph"><Icon icon={Gauge} /></span>
-          <span class="auto">automática</span>
+          <span class="auto">{level}</span>
           {#if fps}<span class="fps t-num" aria-hidden="true">{fps}</span>{/if}
-          <span class="sr-only">Qualidade automática{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
+          <span class="sr-only">Qualidade {level}{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
         </span>
 
         <MorePanel active={expanded} {onreturn} />
@@ -218,6 +225,7 @@
       </Pill>
 
       <span id="{uid}-one" hidden>A outra máquina tem um monitor só</span>
+      <span id="{uid}-look" hidden>{VIEW_ONLY_FILES}</span>
       <span class="sendline" class:on={progress !== null} style:--p={progress ?? 0} aria-hidden="true"
         ><span></span></span
       >

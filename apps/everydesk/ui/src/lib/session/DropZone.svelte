@@ -21,7 +21,8 @@
   import ArrowDownToLine from 'lucide-svelte/icons/arrow-down-to-line'
   import Icon from '../ui/Icon.svelte'
   import type { Contact } from '../policy.ts'
-  import { dispatchJobs, sendFiles } from '../session'
+  import { dispatchJobs, extras, sendFiles } from '../session'
+  import { VIEW_ONLY_FILES, filesAllowed } from './more.ts'
   import { SAME_DROP_MS, dragDepth, dropTarget, hasFiles, overlayActive, type DragStep } from './dropzone.ts'
 
   interface Props {
@@ -34,7 +35,9 @@
   let depth = $state(0)
   let native = $state(false)
   const on = $derived(overlayActive(depth) || native)
-  const label = $derived(dropTarget(name, peerId))
+  // Só olhar: the veil says why a drop does nothing; the drop only leaves a note in the trail.
+  const sends = $derived(filesAllowed($extras))
+  const label = $derived(sends ? dropTarget(name, peerId) : VIEW_ONLY_FILES)
 
   let lastDrop = 0
 
@@ -47,6 +50,10 @@
     if (t - lastDrop < SAME_DROP_MS) return // the same drop seen by both sources
     lastDrop = t
     onactivity?.()
+    if (!filesAllowed($extras)) {
+      dispatchJobs({ type: 'refused', message: VIEW_ONLY_FILES, at: t })
+      return
+    }
     sendFiles(paths).catch((e) => dispatchJobs({ type: 'refused', message: String(e), at: Date.now() }))
   }
 

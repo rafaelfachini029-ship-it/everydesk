@@ -5,10 +5,14 @@ import {
   DENIED_NOTE,
   EXTRAS_EMPTY,
   SWITCHES,
+  VIEW_ONLY_FILES,
   VIEW_ONLY_NOTE,
   actionDenied,
   extrasReducer,
+  filesAllowed,
   inputAllowed,
+  inputOpen,
+  qualityLabel,
   optionAfter,
   qualityValue,
   switchView,
@@ -16,6 +20,7 @@ import {
   type ExtrasAction,
   type ExtrasState,
 } from '../src/lib/session/more.ts'
+import { EMPTY as NO_JOBS, jobsReducer, trailBusy } from '../src/lib/session/jobs.ts'
 
 const run = (actions: ExtrasAction[], s: ExtrasState = EXTRAS_EMPTY) => actions.reduce(extrasReducer, s)
 const sw = (key: string) => SWITCHES.find((d) => d.key === key)!
@@ -91,12 +96,61 @@ test('quality levels map to the engine names', () => {
 })
 
 test('Review Focus 5: no input leaves while Só olhar is on', () => {
-  assert.equal(inputAllowed({ viewOnly: true }), false)
-  assert.equal(inputAllowed({ viewOnly: false }), true)
+  assert.equal(inputAllowed({ viewOnly: true, hydrated: true }), false)
+  assert.equal(inputAllowed({ viewOnly: false, hydrated: true }), true)
   // and RemoteCanvas gates every sender on it
   const src = readFileSync(new URL('../src/lib/RemoteCanvas.svelte', import.meta.url), 'utf8')
   for (const fn of ['onPointerMove', 'onPointerDown', 'onPointerUp', 'onWheel', 'onKey']) {
     const body = src.slice(src.indexOf(`function ${fn}(`), src.indexOf('\n  }\n', src.indexOf(`function ${fn}(`)))
     assert.ok(body.includes('allowed()'), fn)
   }
+})
+
+test('fail-closed: input stays shut until the session options are read', () => {
+  assert.equal(EXTRAS_EMPTY.hydrated, false)
+  assert.equal(inputAllowed({ viewOnly: false, hydrated: false }), false)
+  assert.equal(inputOpen(EXTRAS_EMPTY), false)
+  // events before hydration (permission, an optimistic flip) do not open it
+  assert.equal(inputOpen(run([{ type: 'permission', name: 'audio', value: false }])), false)
+  // a peer saved as view-only: read → still shut
+  assert.equal(inputOpen(run([{ type: 'hydrate', options: { 'view-only': true } }])), false)
+  // read and not view-only → open
+  assert.equal(inputOpen(run([{ type: 'hydrate', options: { 'view-only': false } }])), true)
+  assert.equal(inputOpen(run([{ type: 'hydrate', options: {} }])), true)
+})
+
+test('early permission / block-input events are kept for the panel (hydrate does not drop them)', () => {
+  const s = run([
+    { type: 'permission', name: 'clipboard', value: false },
+    { type: 'blockInput', on: true },
+    { type: 'hydrate', options: { 'disable-clipboard': false } },
+  ])
+  assert.deepEqual(s.denied, ['clipboard'])
+  assert.equal(switchView(s, sw('clipboard')).disabled, true)
+  assert.equal(switchView(s, sw('blockInput')).checked, true)
+})
+
+test('Só olhar blocks file sends (drop note and Arquivos tool)', () => {
+  const ready = run([{ type: 'hydrate', options: {} }])
+  assert.equal(filesAllowed(ready), true)
+  assert.equal(filesAllowed(run([{ type: 'set', option: 'view-only', value: true }], ready)), false)
+  assert.equal(filesAllowed(EXTRAS_EMPTY), false)
+  assert.equal(VIEW_ONLY_FILES, 'Só olhar está ligado')
+  const drop = readFileSync(new URL('../src/lib/session/DropZone.svelte', import.meta.url), 'utf8')
+  assert.match(drop, /if \(!filesAllowed\(\$extras\)\) \{\s*dispatchJobs\(\{ type: 'refused', message: VIEW_ONLY_FILES/)
+  const pill = readFileSync(new URL('../src/lib/session/SessionPill.svelte', import.meta.url), 'utf8')
+  assert.match(pill, /aria-disabled=\{sends \? undefined : 'true'\}/)
+})
+
+test('the pill reads the chosen quality', () => {
+  assert.equal(qualityLabel('auto'), 'automática')
+  assert.equal(qualityLabel('sharp'), 'nítida')
+  assert.equal(qualityLabel('smooth'), 'fluida')
+})
+
+test('a drop under Só olhar becomes the trail note, with no rows', () => {
+  const s = jobsReducer(NO_JOBS, { type: 'refused', message: VIEW_ONLY_FILES, at: 1 })
+  assert.equal(s.note, VIEW_ONLY_FILES)
+  assert.equal(s.jobs.length, 0)
+  assert.ok(trailBusy(s))
 })

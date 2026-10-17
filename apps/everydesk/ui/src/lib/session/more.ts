@@ -10,6 +10,7 @@ export type OptionName =
   | 'disable-clipboard'
   | 'disable-audio'
   | 'show-remote-cursor'
+  | 'follow-remote-cursor'
   | 'block-input'
   | 'lock-after-session-end'
 
@@ -79,8 +80,13 @@ export const ACTION_PERMISSION: Record<ActionKey, string> = {
 
 export const DENIED_NOTE = 'a outra máquina não permite'
 export const VIEW_ONLY_NOTE = 'desligado enquanto você só olha'
+/** Why a file drop (or the Arquivos tool) does nothing. */
+export const VIEW_ONLY_FILES = 'Só olhar está ligado'
 
 export interface ExtrasState {
+  /** The session's stored options have been read (`session_get_toggles`). Until then the
+   *  view-only state is unknown and input stays closed (fail-closed, Review Focus 5). */
+  hydrated: boolean
   /** Raw engine option states (`disable-audio: true` means no sound). */
   options: Partial<Record<OptionName, boolean>>
   /** Permissions the host has taken away (`session:permission` with value false). */
@@ -88,7 +94,7 @@ export interface ExtrasState {
   quality: QualityLevel
 }
 
-export const EXTRAS_EMPTY: ExtrasState = { options: {}, denied: [], quality: 'auto' }
+export const EXTRAS_EMPTY: ExtrasState = { hydrated: false, options: {}, denied: [], quality: 'auto' }
 
 export type ExtrasAction =
   /** `session_get_toggles` + `session_get_quality` when the panel opens. */
@@ -106,6 +112,7 @@ const KNOWN: readonly OptionName[] = [
   'disable-clipboard',
   'disable-audio',
   'show-remote-cursor',
+  'follow-remote-cursor',
   'block-input',
   'lock-after-session-end',
 ]
@@ -116,7 +123,7 @@ export function extrasReducer(s: ExtrasState, a: ExtrasAction): ExtrasState {
       const options = { ...s.options }
       for (const [k, v] of Object.entries(a.options))
         if ((KNOWN as readonly string[]).includes(k) && typeof v === 'boolean') options[k as OptionName] = v
-      return { ...s, options, quality: isQualityLevel(a.quality) ? a.quality : s.quality }
+      return { ...s, hydrated: true, options, quality: isQualityLevel(a.quality) ? a.quality : s.quality }
     }
     case 'set':
       return { ...s, options: { ...s.options, [a.option]: a.value } }
@@ -169,7 +176,19 @@ export function optionAfter(def: SwitchDef, on: boolean): boolean {
 
 export const viewOnly = (s: ExtrasState) => s.options['view-only'] === true
 
-/** Review Focus 5: with "Só olhar" on, no pointer, key or wheel event leaves this machine. */
-export function inputAllowed(g: { viewOnly: boolean }): boolean {
-  return !g.viewOnly
+/** Review Focus 5: with "Só olhar" on — or before the session's options are known (a peer
+ *  saved as view-only) — no pointer, key or wheel event leaves this machine. */
+export function inputAllowed(g: { viewOnly: boolean; hydrated: boolean }): boolean {
+  return g.hydrated && !g.viewOnly
+}
+
+/** The gate for the current state. */
+export const inputOpen = (s: ExtrasState) => inputAllowed({ viewOnly: viewOnly(s), hydrated: s.hydrated })
+
+/** Sending files (drop or the Arquivos tool) follows the same gate: Só olhar sends nothing. */
+export const filesAllowed = inputOpen
+
+/** The pill's quality reading: "automática" / "nítida" / "fluida". */
+export function qualityLabel(level: QualityLevel): string {
+  return QUALITY_LEVELS.find((q) => q.level === level)?.label ?? 'automática'
 }

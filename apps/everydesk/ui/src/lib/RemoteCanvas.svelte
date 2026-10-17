@@ -5,7 +5,7 @@
   import type { ConnEvent } from './connecting/connecting.ts'
   import SessionPill from './session/SessionPill.svelte'
   import DropZone from './session/DropZone.svelte'
-  import { inputAllowed, viewOnly } from './session/more.ts'
+  import { inputOpen, viewOnly } from './session/more.ts'
   import {
     ALT_IDLE,
     altTapReducer,
@@ -38,6 +38,8 @@
     currentDisplay,
     displayList,
     extras,
+    hydrateExtras,
+    listenExtras,
     mergeQuality,
     quality,
     resetSessionState,
@@ -191,10 +193,11 @@
   const heldKeys = new Set<string>()
   const wheelAcc = { x: 0, y: 0 }
   const NO_MODS: Modifiers = { alt: false, ctrl: false, shift: false, command: false }
-  // "Só olhar" (Review Focus 5): plain copy read on every event; `looking` drives the cursor.
+  // "Só olhar" (Review Focus 5): plain copy of the gate read on every event. Closed until the
+  // session's options are read (a peer saved as view-only starts with nothing going out).
   let viewOnlyOn = false
-  let looking = $state(false)
-  const allowed = () => inputAllowed({ viewOnly: viewOnlyOn })
+  let open = false
+  const allowed = () => open
 
   /** Pointer over the visible pill: this event must not reach the remote (Review Focus 5). */
   function inDeadZone(e: MouseEvent): boolean {
@@ -404,6 +407,7 @@
       }),
       listen(EVENTS.connected, () => {
         connected = true
+        hydrateExtras()
         if (!revealed) onevent?.({ type: 'connected' })
         if (msg && !needsPassword && msg.kind !== 'error') msg = null
       }),
@@ -415,6 +419,7 @@
       listen<Quality>(EVENTS.quality, (e) => {
         quality.update((prev) => mergeQuality(prev, e.payload))
       }),
+      ...listenExtras(),
       listen(EVENTS.closed, () => {
         if (revealed) revealDone()
         onclosed(lastMsg)
@@ -429,7 +434,7 @@
       const v = viewOnly(s)
       if (v && !viewOnlyOn) releaseAll()
       viewOnlyOn = v
-      looking = v
+      open = inputOpen(s)
     })
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
@@ -459,7 +464,6 @@
   <canvas
     bind:this={canvas}
     tabindex={revealed ? 0 : -1}
-    class:looking
     onpointermove={onPointerMove}
     onpointerdown={onPointerDown}
     onpointerup={onPointerUp}
@@ -536,10 +540,6 @@
     outline: none;
     cursor: default;
     touch-action: none;
-  }
-  /* Só olhar: a plain pointer, nothing here acts on the remote */
-  canvas.looking {
-    cursor: default;
   }
   .overlay {
     position: absolute;

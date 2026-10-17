@@ -185,12 +185,15 @@ pub fn session_frame_ack() {
 
 /// The only options the webview may toggle (closed list; the engine's own names, see
 /// `LoginConfigHandler::toggle_option` in `src/client.rs`). Anything else is refused, so the
-/// UI can never reach `privacy-mode` (needs an impl key) or set arbitrary peer options.
-pub const TOGGLES: [&str; 7] = [
+/// UI can never set arbitrary peer options. `privacy-mode` is deliberately out: the engine
+/// toggles it through `toggle_privacy_mode(impl_key, on)` with a host-specific implementation
+/// key, and a plain flip here would ask the host for a mode it may not support.
+pub const TOGGLES: [&str; 8] = [
     "view-only",
     "disable-clipboard",
     "disable-audio",
     "show-remote-cursor",
+    "follow-remote-cursor",
     "block-input",
     "unblock-input",
     "lock-after-session-end",
@@ -198,11 +201,12 @@ pub const TOGGLES: [&str; 7] = [
 
 /// The toggles whose state the engine keeps (`get_toggle_option`). Block input is a request
 /// to the host, not a stored option: its state comes back as `session:block_input`.
-const STORED_TOGGLES: [&str; 5] = [
+const STORED_TOGGLES: [&str; 6] = [
     "view-only",
     "disable-clipboard",
     "disable-audio",
     "show-remote-cursor",
+    "follow-remote-cursor",
     "lock-after-session-end",
 ];
 

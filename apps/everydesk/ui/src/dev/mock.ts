@@ -12,6 +12,7 @@ const contacts: Contact[] = [
   { peer_id: 'rio-coruja-21', name: 'Recepção', policy: { kind: 'Reconfirm', every_min: 45 }, online: false },
 ]
 
+let mockQuality = 'auto'
 const toggles: Record<string, boolean> = {
   'view-only': false,
   'disable-clipboard': false,
@@ -39,7 +40,10 @@ mockIPC(
       case 'session_get_toggles':
         return { ...toggles }
       case 'session_get_quality':
-        return 'auto'
+        return mockQuality
+      case 'session_quality':
+        mockQuality = (args as { level: string }).level
+        return null
       case 'session_toggle': {
         const name = (args as { name: string }).name
         if (name === 'block-input' || name === 'unblock-input') return name === 'block-input'
