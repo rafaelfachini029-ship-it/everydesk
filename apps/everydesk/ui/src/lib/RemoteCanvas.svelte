@@ -1,6 +1,8 @@
 <script lang="ts">
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
   import { onMount } from 'svelte'
+  import { DUR, EASE, animate } from '../design/motion.ts'
+  import type { ConnEvent } from './connecting/connecting.ts'
   import {
     EVENTS,
     FRAME_HEADER_LEN,
@@ -29,8 +31,12 @@
     peerId: string
     password: string
     onclosed: (lastMessage: MsgBox | null) => void
+    /** Session events before the first frame, for the connecting screen (moment 2). */
+    onevent?: (e: ConnEvent) => void
+    /** The reveal finished: the connecting screen underneath can go. */
+    onrevealed?: () => void
   }
-  let { peerId, password, onclosed }: Props = $props()
+  let { peerId, password, onclosed, onevent, onrevealed }: Props = $props()
 
   let canvas: HTMLCanvasElement
   let ctx: CanvasRenderingContext2D | null = null
@@ -40,6 +46,10 @@
   let msg = $state<MsgBox | null>(null)
   let quality = $state<Quality>({ fps: null, delay: null, speed: null })
   let retryPassword = $state('')
+  // Hidden (clipped to nothing) until the first frame; until then the connecting screen
+  // shows the progress and any message.
+  let revealed = $state(false)
+  let root: HTMLElement
   // Fallback ImageData (one per display) for packets whose stride has padding.
   const images = new Map<number, ImageData>()
 
@@ -76,12 +86,31 @@
         img = cached
       }
       ctx.putImageData(img, 0, 0)
+      if (!revealed) reveal()
       if (!connected) {
         connected = true
         if (msg && !needsPassword && msg.kind !== 'error') msg = null
       }
     }
     frameAck()
+  }
+
+  /** First frame: open the remote screen from the centre (instant under reduced motion). */
+  function reveal() {
+    revealed = true
+    onevent?.({ type: 'frame' })
+    canvas.focus()
+    const a = animate(
+      root,
+      [{ clipPath: 'circle(0% at 50% 50%)' }, { clipPath: 'circle(150% at 50% 50%)' }],
+      { duration: DUR.slow, easing: EASE.out },
+    )
+    a.finished.then(
+      () => onrevealed?.(),
+      () => onrevealed?.(),
+    )
+    // A hidden or throttled webview may not advance animations: never leave the screen clipped.
+    setTimeout(() => a.playState !== 'finished' && a.finish(), DUR.slow + 300)
   }
 
   function mods(e: MouseEvent | KeyboardEvent): Modifiers {
@@ -184,17 +213,21 @@
 
   onMount(() => {
     ctx = canvas.getContext('2d')
-    canvas.focus()
     let lastMsg: MsgBox | null = null
     const unlisten: Promise<UnlistenFn>[] = [
-      listen<DisplayRect[]>(EVENTS.displays, (e) => (displays = e.payload)),
+      listen<DisplayRect[]>(EVENTS.displays, (e) => {
+        displays = e.payload
+        if (!revealed) onevent?.({ type: 'displays' })
+      }),
       listen(EVENTS.connected, () => {
         connected = true
+        if (!revealed) onevent?.({ type: 'connected' })
         if (msg && !needsPassword && msg.kind !== 'error') msg = null
       }),
       listen<MsgBox>(EVENTS.msgbox, (e) => {
-        msg = e.payload
         lastMsg = e.payload
+        if (revealed) msg = e.payload
+        else onevent?.({ type: 'msgbox', box: e.payload })
       }),
       listen<Quality>(EVENTS.quality, (e) => {
         const q = e.payload
@@ -230,7 +263,7 @@
   })
 </script>
 
-<div class="remote">
+<div class="remote" class:revealed bind:this={root}>
   <canvas
     bind:this={canvas}
     tabindex="0"
@@ -253,21 +286,17 @@
     <button onclick={disconnect}>Desconectar</button>
   </div>
 
-  {#if !connected || msg}
+  {#if revealed && msg}
     <div class="overlay">
-      {#if msg}
-        <p><strong>{msg.title}</strong></p>
-        <p>{msg.text}</p>
-        {#if needsPassword}
-          <form onsubmit={submitPassword}>
-            <input type="password" placeholder="Senha" bind:value={retryPassword} />
-            <button type="submit">Entrar</button>
-          </form>
-        {:else if connected}
-          <button onclick={() => (msg = null)}>OK</button>
-        {/if}
-      {:else}
-        <p>Conectando a {peerId}...</p>
+      <p><strong>{msg.title}</strong></p>
+      <p>{msg.text}</p>
+      {#if needsPassword}
+        <form onsubmit={submitPassword}>
+          <input type="password" placeholder="Senha" bind:value={retryPassword} />
+          <button type="submit">Entrar</button>
+        </form>
+      {:else if connected}
+        <button onclick={() => (msg = null)}>OK</button>
       {/if}
     </div>
   {/if}
@@ -278,6 +307,10 @@
     position: fixed;
     inset: 0;
     background: #111;
+    clip-path: circle(0% at 50% 50%);
+  }
+  .remote.revealed {
+    clip-path: circle(150% at 50% 50%);
   }
   canvas {
     width: 100%;
