@@ -2,6 +2,7 @@ mod cm;
 mod commands;
 mod contacts;
 mod files;
+mod record;
 mod server;
 mod session;
 pub mod memorable;
@@ -140,6 +141,8 @@ fn run() {
             commands::session_toggle, commands::session_get_toggles, commands::session_quality, commands::session_get_quality, commands::session_fps, commands::session_restart, commands::session_ctrl_alt_del, commands::session_lock,
             commands::session_send_chat,
             commands::session_voice,
+            commands::session_record, commands::session_is_recording,
+            record::recordings_dir, record::open_recordings_dir,
             files::session_send_files,
             files::session_pick_and_send,
             files::session_cancel_job,

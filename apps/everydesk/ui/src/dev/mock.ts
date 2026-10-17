@@ -63,6 +63,12 @@ mockIPC(
           if (location.hash === '#voz-recusa') setTimeout(() => emit('session:voice', { state: 'off', reason: '' }), 1500)
         } else setTimeout(() => emit('session:voice', { state: 'off', reason: 'Closed manually by the peer' }), 50)
         return null
+      // Gravar (/#gravar, /#gravar-parado): the engine answers at once.
+      case 'session_record':
+        setTimeout(() => emit('session:record', { on: (args as { start: boolean }).start }), 80)
+        return null
+      case 'recordings_dir':
+        return '/Users/voce/Movies/EveryDesk'
       case 'cm_voice_answer': {
         const { connId, accept } = args as { connId: number; accept: boolean }
         setTimeout(() => emit('cm:voice', { conn_id: connId, incoming: false, active: accept }), 300)
@@ -95,7 +101,7 @@ mockIPC(
         return {
           pending: [],
           connected:
-            location.hash === '#conectado' || location.hash === '#conversa-host' || location.hash === '#voz-host'
+            location.hash === '#conectado' || location.hash === '#conversa-host' || location.hash === '#voz-host' || location.hash === '#gravar-host'
               ? [
                   { conn_id: 1, peer_id: 'agua-lua-7', name: 'Mãe' },
                   { conn_id: 2, peer_id: 'pedra-gaviao-90', name: '' },
@@ -114,6 +120,8 @@ mockIPC(
               : [],
           // /#voz-host: a call with Mãe is on; the other session asks for one (below).
           voices: location.hash === '#voz-host' ? [{ conn_id: 1, incoming: false, active: true }] : [],
+          // /#gravar-host: Mãe is recording; the other session starts too (below).
+          records: location.hash === '#gravar-host' ? [{ conn_id: 1, on: true }] : [],
         }
       default:
         return null
@@ -142,7 +150,8 @@ if (location.hash === '#claro') {
 // /#aviso and /#senha-sessao: a session, then a notice / a password prompt over it (the
 // overlay is a modal dialog that owns the keyboard).
 const flow = location.hash.slice(1)
-const sessionFlow = flow === 'voz' || flow === 'voz-recusa' || flow === 'conversa' || flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
+const recordFlow = flow === 'gravar' || flow === 'gravar-parado' || flow === 'gravar-negado'
+const sessionFlow = recordFlow || flow === 'voz' || flow === 'voz-recusa' || flow === 'conversa' || flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
   const box = (kind: string, title: string, text: string) => emit('session:msgbox', { kind, title, text })
@@ -204,6 +213,18 @@ function connecting(frames: Channel<ArrayBuffer>) {
       at(1000, () => document.querySelector<HTMLButtonElement>('.voicetool .tool')?.click())
       at(1500, () => document.querySelector<HTMLElement>('.dock .pill')?.focus())
     }
+    // Gravar (controller): /#gravar starts recording and leaves the pill collapsed with the
+    // lamp; /#gravar-parado stops after a few seconds ("Abrir pasta"); /#gravar-negado: the
+    // host does not allow recording (the tool reads so).
+    if (recordFlow) {
+      const tool = () => document.querySelector<HTMLButtonElement>('.recordtool .tool')
+      // the tools are inert while the pill is hidden: open it first
+      at(1400, () => document.querySelector<HTMLElement>('.dock .pill')?.focus())
+      if (flow === 'gravar-negado') at(600, () => emit('session:permission', { name: 'recording', value: false }))
+      else at(1600, () => tool()?.click())
+      if (flow === 'gravar') at(1900, () => (document.activeElement as HTMLElement | null)?.blur())
+      if (flow === 'gravar-parado') at(4800, () => tool()?.click())
+    }
     if (flow === 'senha-sessao') at(1500, () => box('re-input-password', 'Digite a senha de novo', 'A senha mudou na outra máquina.'))
   }
   if (flow === 'revela') {
@@ -264,7 +285,10 @@ if (flow === 'conversa-host')
 // Voz (host): the unnamed session asks for a voice call.
 if (flow === 'voz-host') setTimeout(() => emit('cm:voice', { conn_id: 2, incoming: true, active: false }), 1200)
 
-if (['voz', 'voz-recusa', 'conversa', 'busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
+// Gravar (host): the unnamed session starts recording too.
+if (flow === 'gravar-host') setTimeout(() => emit('cm:record', { conn_id: 2, on: true }), 1200)
+
+if (['gravar', 'gravar-parado', 'gravar-negado', 'voz', 'voz-recusa', 'conversa', 'busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return

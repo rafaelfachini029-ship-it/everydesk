@@ -30,6 +30,9 @@
   import ChatPanel from './ChatPanel.svelte'
   import VoiceDot from './VoiceDot.svelte'
   import VoiceTool from './VoiceTool.svelte'
+  import RecordLamp from './RecordLamp.svelte'
+  import RecordTool from './RecordTool.svelte'
+  import { recording } from './record.ts'
   import { VIEW_ONLY_FILES, filesAllowed, qualityLabel } from './more.ts'
   import type { Contact } from '../policy.ts'
   import { currentDisplay, dispatchJobs, displayList, extras, jobs, pickAndSend, quality, switchDisplay } from '../session'
@@ -64,6 +67,8 @@
   const hideTimer = createHideTimer(() => {
     // a send in the trail keeps the pill up until it is over
     if (busy) return hideTimer.poke()
+    // recording: the lamp stays in sight (collapsed), spec §5.3
+    if ($recording.on) return ((expanded = false), (hint = null), hideTimer.poke())
     shown = false
     expanded = false
     hint = null
@@ -170,6 +175,7 @@
             <span class="who code t-num">{peerId}</span>
           {/if}
           <VoiceDot />
+          <RecordLamp />
         {/snippet}
 
         <div class="group" role="group" aria-label="Monitores">
@@ -214,6 +220,7 @@
         >
           <Icon icon={FileUp} />
         </button>
+        <RecordTool {onreturn} onhint={show} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
 
         <span class="quality">
           <span class="glyph"><Icon icon={Gauge} /></span>

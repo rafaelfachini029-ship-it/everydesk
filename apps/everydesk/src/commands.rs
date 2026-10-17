@@ -346,6 +346,26 @@ pub fn session_voice(start: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// "Gravar" in the pill: `start` asks the video thread for a key frame first (`refresh_video`,
+/// so the file opens on one), then starts the engine's recorder; `!start` stops it, which
+/// finalizes the file. Both answer with `session:record {on}`. Files go to
+/// `crate::record::recordings_dir()`.
+#[tauri::command]
+pub fn session_record(start: bool) -> Result<(), String> {
+    let s = require_session()?;
+    if start {
+        s.refresh_video(0);
+    }
+    s.record_screen(start);
+    Ok(())
+}
+
+/// Whether the running session is recording (false without a session).
+#[tauri::command]
+pub fn session_is_recording() -> bool {
+    require_session().map(|s| s.is_recording()).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

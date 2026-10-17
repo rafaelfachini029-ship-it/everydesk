@@ -27,6 +27,7 @@ hbb_common = { path = "../../libs/hbb_common" }
 scrap = { path = "../../libs/scrap" }
 base = { path = "../../libs/base" }
 tauri-plugin-dialog = "2.8.3"
+tauri-plugin-opener = "2"
 
 [features]
 hwcodec = ["rustdesk/hwcodec"]

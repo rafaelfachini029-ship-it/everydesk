@@ -11,6 +11,7 @@
   import Button from '../ui/Button.svelte'
   import HostChat from './HostChat.svelte'
   import VoiceCard from './VoiceCard.svelte'
+  import RecordMark from './RecordMark.svelte'
   import { applyCm, badgeLabel, sessions } from './badge.ts'
 
   /** conn_id → why "Encerrar" failed; the badge stays (the access is still on). */
@@ -44,6 +45,7 @@
         <strong class:code={!named}>{badgeLabel(c)}</strong>
         <span class="verb">está acessando</span>
       </span>
+      <RecordMark conn={c} />
       <HostChat conn={c} />
       <VoiceCard conn={c} />
       <Button variant="danger" onclick={() => end(c.conn_id)}>Encerrar</Button>

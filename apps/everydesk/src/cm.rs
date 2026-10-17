@@ -19,6 +19,8 @@
 //! `cm:voice {conn_id, incoming, active}` (the controller `conn_id` asks for a voice call
 //! (`incoming`), the call is on (`active`), or neither (refused/ended)). Calls that are asking
 //! or on come back in `cm_pending` (`voices`); `cm_voice_answer` / `cm_voice_close` answer.
+//! `cm:record {conn_id, on}` (the controller `conn_id` started / stopped recording this
+//! session). Connections recording now come back in `cm_pending` (`records`).
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
@@ -26,7 +28,7 @@ use crate::contacts::PolicyView;
 use librustdesk::everydesk::pairings::{IdentityState, Policy};
 use serde::Serialize;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Mutex,
     time::Instant,
 };
@@ -133,6 +135,15 @@ pub struct CmState {
     elevation: Elevation,
     chats: BTreeMap<i32, VecDeque<CmChat>>,
     voices: BTreeMap<i32, CmVoice>,
+    recording: BTreeSet<i32>,
+}
+
+/// `cm:record`, and one entry of `CmSnapshot::records` (always `on` there).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CmRecord {
+    pub conn_id: i32,
+    /// The controller is recording this session.
+    pub on: bool,
 }
 
 /// `cm:voice`, and one entry of `CmSnapshot::voices`. Both false: no call (refused, ended).
@@ -199,6 +210,8 @@ pub struct CmSnapshot {
     pub chats: Vec<CmChat>,
     /// Voice calls asking or on (never both false).
     pub voices: Vec<CmVoice>,
+    /// Controllers recording now.
+    pub records: Vec<CmRecord>,
 }
 
 impl CmState {
@@ -261,6 +274,16 @@ impl CmState {
         self.reconfirms.remove(&conn_id);
         self.chats.remove(&conn_id);
         self.voices.remove(&conn_id);
+        self.recording.remove(&conn_id);
+    }
+
+    /// The controller of `r.conn_id` started / stopped recording.
+    pub fn record(&mut self, r: CmRecord) {
+        if r.on {
+            self.recording.insert(r.conn_id);
+        } else {
+            self.recording.remove(&r.conn_id);
+        }
     }
 
     /// The voice call state of a connection (dropped when neither asking nor on).
@@ -304,6 +327,11 @@ impl CmState {
                 .collect(),
             chats: self.chats.values().flatten().cloned().collect(),
             voices: self.voices.values().copied().collect(),
+            records: self
+                .recording
+                .iter()
+                .map(|&conn_id| CmRecord { conn_id, on: true })
+                .collect(),
         }
     }
 }
@@ -504,6 +532,13 @@ impl InvokeUiCM for TauriCM {
         self.emit("cm:voice", v);
     }
     fn file_transfer_log(&self, _action: &str, _log: &str) {}
+
+    fn record_status(&self, id: i32, recording: bool) {
+        let r = CmRecord { conn_id: id, on: recording };
+        log::info!("everydesk: record #{id} {recording}");
+        with_state(|s| s.record(r));
+        self.emit("cm:record", r);
+    }
 
     fn reconfirm(&self, conn_id: i32, ring_secs: u32) {
         log::info!("everydesk: reconfirm #{conn_id} ({ring_secs} s)");
@@ -919,6 +954,29 @@ mod tests {
         s.voice(v(1, false, false));
         s.remove(2);
         assert_eq!(s.snapshot(Instant::now()), CmSnapshot::default());
+    }
+
+    #[test]
+    fn recordings_are_hydrated_and_cleared() {
+        let mut s = CmState::default();
+        s.record(CmRecord { conn_id: 4, on: true });
+        s.record(CmRecord { conn_id: 5, on: true });
+        s.record(CmRecord { conn_id: 5, on: false });
+        let snap = s.snapshot(Instant::now());
+        assert_eq!(snap.records, vec![CmRecord { conn_id: 4, on: true }]);
+        assert_eq!(
+            serde_json::to_value(&snap).unwrap()["records"],
+            serde_json::json!([{"conn_id": 4, "on": true}])
+        );
+        // Review Focus 4: the session drops while recording → the indicator goes with it.
+        s.remove(4);
+        assert_eq!(s.snapshot(Instant::now()), CmSnapshot::default());
+    }
+
+    #[test]
+    fn record_event_serializes_for_the_ui() {
+        let v = serde_json::to_value(CmRecord { conn_id: 2, on: false }).unwrap();
+        assert_eq!(v, serde_json::json!({"conn_id": 2, "on": false}));
     }
 
     #[test]
