@@ -1,8 +1,8 @@
 /**
- * Pure state for the file drop zone (spec §6.2 moment 5). Stage 3 is visual only: nothing
- * here reads or sends a file. No DOM or Tauri dependency so `node --test` can exercise it.
+ * Pure state for the file drop zone (spec §6.2 moment 5). The send itself is
+ * `session.ts::sendFiles`; the progress is `jobs.ts`. No DOM or Tauri dependency so
+ * `node --test` can exercise it.
  */
-import { writable } from 'svelte/store'
 
 /** What the drag events tell the counter. */
 export type DragStep = 'enter' | 'leave' | 'drop' | 'reset'
@@ -42,21 +42,5 @@ export function dropTarget(name: string | null | undefined, peerId: string): str
   return `Solte para enviar para ${name?.trim() || peerId}`
 }
 
-/** The trail in the pill fills over this long… */
-export const TRAIL_FILL_MS = 1200
-/** …then the note stays this long and everything fades. */
-export const TRAIL_NOTE_MS = 2800
-export const TRAIL_NOTE = 'Transferência de arquivos chega em breve'
-
-export type TrailPhase = 'idle' | 'fill' | 'note'
-
-/** Where the "em breve" trail is, `elapsed` ms after the drop. */
-export function trailPhase(elapsed: number): TrailPhase {
-  if (elapsed < 0) return 'idle'
-  if (elapsed < TRAIL_FILL_MS) return 'fill'
-  if (elapsed < TRAIL_FILL_MS + TRAIL_NOTE_MS) return 'note'
-  return 'idle'
-}
-
-/** Shared between DropZone (writes) and the pill's FileTrail (reads). */
-export const trail = writable<TrailPhase>('idle')
+/** A drop is seen by both sources (DOM and the webview) in some setups: one send per drop. */
+export const SAME_DROP_MS = 300

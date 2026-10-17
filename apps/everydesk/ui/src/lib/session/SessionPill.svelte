@@ -3,9 +3,11 @@
   Collapsed: latency, who is on the other side, the voice dot. Hover or focus expands it into
   the session tools; it hides 2 s after the pointer and focus leave, and comes back when the
   pointer reaches the top edge (peek) or on an Alt tap (summon, which also focuses it).
-  Only what works is here (sessionPill.ts PILL_TOOLS): monitors, the quality reading and
-  Encerrar. Chat, files, recording and voice return in Stage 4. On narrow windows (or 200 %
-  zoom) the pill wraps onto two rows so Encerrar is never clipped.
+  Only what works is here (sessionPill.ts PILL_TOOLS): monitors, Arquivos (the system picker;
+  dropping on the screen sends too), the quality reading and Encerrar. File sends show as a
+  line of light along the pill's lower edge (all of them together) and as the FileTrail rows
+  under it; while the trail has anything to show the pill stays up. On narrow windows (or
+  200 % zoom) the pill wraps onto two rows so Encerrar is never clipped.
   Props:
     peerId: string
     onend: () => void — "Encerrar"
@@ -19,12 +21,14 @@
   import Monitor from 'lucide-svelte/icons/monitor'
   import Gauge from 'lucide-svelte/icons/gauge'
   import PhoneOff from 'lucide-svelte/icons/phone-off'
+  import FileUp from 'lucide-svelte/icons/file-up'
   import Button from '../ui/Button.svelte'
   import Icon from '../ui/Icon.svelte'
   import Pill from '../ui/Pill.svelte'
   import FileTrail from './FileTrail.svelte'
   import type { Contact } from '../policy.ts'
-  import { currentDisplay, displayList, quality, switchDisplay } from '../session'
+  import { currentDisplay, dispatchJobs, displayList, jobs, pickAndSend, quality, switchDisplay } from '../session'
+  import { overall, trailBusy } from './jobs.ts'
   import { createHideTimer, formatFps, formatLatency, type Rect } from './sessionPill.ts'
 
   interface Props {
@@ -45,12 +49,23 @@
   const latency = $derived(formatLatency($quality.delay))
   const fps = $derived(formatFps($quality.fps))
 
+  const busy = $derived(trailBusy($jobs))
+  const progress = $derived(overall($jobs.jobs))
+
   const hideTimer = createHideTimer(() => {
+    // a send in the trail keeps the pill up until it is over
+    if (busy) return hideTimer.poke()
     shown = false
     expanded = false
     hint = null
   })
   onDestroy(() => hideTimer.cancel())
+  $effect(() => {
+    if (busy) {
+      shown = true
+      hideTimer.poke()
+    }
+  })
 
   onMount(() => {
     hideTimer.poke()
@@ -111,6 +126,10 @@
   function show(text: string | null) {
     hint = text
   }
+  function sendSome() {
+    onreturn()
+    pickAndSend().catch((e) => dispatchJobs({ type: 'refused', message: String(e), at: Date.now() }))
+  }
   function pick(i: number) {
     switchDisplay(i)
     onreturn()
@@ -121,6 +140,7 @@
   bind:this={dock}
   class="dock"
   class:hidden={!shown}
+  class:busy
   inert={!shown}
   role="presentation"
   onpointerenter={() => hideTimer.hold()}
@@ -130,61 +150,79 @@
   {onkeydowncapture}
   ontransitionend={stale}
 >
-  <Pill label="Controles da sessão" bind:expanded>
-    {#snippet summary()}
-      <span class="lat t-num" aria-label="Atraso {latency}">{latency}</span>
-      {#if name}
-        <span class="who">{name}</span>
-      {:else}
-        <span class="who code t-num">{peerId}</span>
-      {/if}
-      <span class="voice" role="img" aria-label="Voz desligada"></span>
-    {/snippet}
+  <div class="bar">
+    <div class="pillwrap">
+      <Pill label="Controles da sessão" bind:expanded>
+        {#snippet summary()}
+          <span class="lat t-num" aria-label="Atraso {latency}">{latency}</span>
+          {#if name}
+            <span class="who">{name}</span>
+          {:else}
+            <span class="who code t-num">{peerId}</span>
+          {/if}
+          <span class="voice" role="img" aria-label="Voz desligada"></span>
+        {/snippet}
 
-    <div class="group" role="group" aria-label="Monitores">
-      {#if $displayList.length > 1}
-        <span class="glyph"><Icon icon={Monitor} /></span>
-        {#each $displayList as _, i (i)}
-          <button
-            class="tool num t-num"
-            aria-pressed={i === $currentDisplay}
-            aria-label="Monitor {i + 1} de {$displayList.length}"
-            onclick={() => pick(i)}
-            onpointerenter={() => show(`Monitor ${i + 1} de ${$displayList.length}`)}
-            onfocus={() => show(`Monitor ${i + 1} de ${$displayList.length}`)}
-            onpointerleave={() => show(null)}>{i + 1}</button
-          >
-        {/each}
-      {:else}
+        <div class="group" role="group" aria-label="Monitores">
+          {#if $displayList.length > 1}
+            <span class="glyph"><Icon icon={Monitor} /></span>
+            {#each $displayList as _, i (i)}
+              <button
+                class="tool num t-num"
+                aria-pressed={i === $currentDisplay}
+                aria-label="Monitor {i + 1} de {$displayList.length}"
+                onclick={() => pick(i)}
+                onpointerenter={() => show(`Monitor ${i + 1} de ${$displayList.length}`)}
+                onfocus={() => show(`Monitor ${i + 1} de ${$displayList.length}`)}
+                onpointerleave={() => show(null)}>{i + 1}</button
+              >
+            {/each}
+          {:else}
+            <button
+              class="tool"
+              aria-disabled="true"
+              onclick={onreturn}
+              aria-label="Monitores"
+              aria-describedby="{uid}-one"
+              onpointerenter={() => show('Um monitor só')}
+              onfocus={() => show('Um monitor só')}
+              onpointerleave={() => show(null)}
+            >
+              <Icon icon={Monitor} />
+            </button>
+          {/if}
+        </div>
+
         <button
           class="tool"
-          aria-disabled="true"
-          onclick={onreturn}
-          aria-label="Monitores"
-          aria-describedby="{uid}-one"
-          onpointerenter={() => show('Um monitor só')}
-          onfocus={() => show('Um monitor só')}
+          aria-label="Arquivos"
+          onclick={sendSome}
+          onpointerenter={() => show('Enviar arquivos para a outra máquina')}
+          onfocus={() => show('Enviar arquivos para a outra máquina')}
           onpointerleave={() => show(null)}
         >
-          <Icon icon={Monitor} />
+          <Icon icon={FileUp} />
         </button>
-      {/if}
+
+        <span class="quality">
+          <span class="glyph"><Icon icon={Gauge} /></span>
+          <span class="auto">automática</span>
+          {#if fps}<span class="fps t-num" aria-hidden="true">{fps}</span>{/if}
+          <span class="sr-only">Qualidade automática{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
+        </span>
+
+        <span class="rule" aria-hidden="true"></span>
+        <Button variant="danger" icon={PhoneOff} onclick={onend}>Encerrar</Button>
+      </Pill>
+
+      <span id="{uid}-one" hidden>A outra máquina tem um monitor só</span>
+      <span class="sendline" class:on={progress !== null} style:--p={progress ?? 0} aria-hidden="true"
+        ><span></span></span
+      >
     </div>
-
-    <span class="quality">
-      <span class="glyph"><Icon icon={Gauge} /></span>
-      <span class="auto">automática</span>
-      {#if fps}<span class="fps t-num" aria-hidden="true">{fps}</span>{/if}
-      <span class="sr-only">Qualidade automática{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
-    </span>
-
-    <span class="rule" aria-hidden="true"></span>
-    <Button variant="danger" icon={PhoneOff} onclick={onend}>Encerrar</Button>
-  </Pill>
-
-  <span id="{uid}-one" hidden>A outra máquina tem um monitor só</span>
-  <p class="hint" class:on={expanded && hint} aria-hidden="true">{hint ?? ''}</p>
-  <FileTrail />
+    <p class="hint" class:on={expanded && hint} aria-hidden="true">{hint ?? ''}</p>
+  </div>
+  <FileTrail {onreturn} />
 </div>
 
 <style>
@@ -194,7 +232,7 @@
     left: 50%;
     z-index: 2;
     display: flex;
-    justify-content: center;
+    flex-direction: column;
     width: max-content;
     max-width: calc(100vw - 2 * var(--space-4));
     transform: translate(-50%, 0);
@@ -214,6 +252,47 @@
       opacity var(--dur-base) var(--ease-out),
       visibility 0s linear var(--dur-base);
   }
+  /* the trail's rows need room; only while there is something to show */
+  .dock.busy {
+    min-width: min(340px, calc(100vw - 2 * var(--space-4)));
+  }
+  .bar {
+    position: relative;
+    display: flex;
+    justify-content: center;
+  }
+  .pillwrap {
+    position: relative;
+    display: flex;
+    max-width: 100%;
+  }
+  /* All sends together, as one line of light along the pill's lower edge. */
+  .sendline {
+    position: absolute;
+    left: var(--space-5);
+    right: var(--space-5);
+    bottom: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--accent-track);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity var(--dur-slow) var(--ease-out);
+  }
+  .sendline.on {
+    opacity: 1;
+  }
+  .sendline span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow);
+    transform-origin: left center;
+    transform: scaleX(var(--p));
+    transition: transform var(--dur-slow) var(--ease-out);
+  }
+
   /* A hidden pill must never catch input, even while it fades. */
   .dock.hidden :global(.pill) {
     pointer-events: none;

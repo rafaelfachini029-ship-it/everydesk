@@ -22,10 +22,10 @@ export function formatFps(fps: number | null | undefined): string | null {
   return `${Math.max(0, Math.round(fps))} fps`
 }
 
-/** What the expanded pill holds in Stage 3: only tools that work. Chat, files, recording and
- *  voice come back in Stage 4, when they do something ("em dúvida, remover", spec §6.3).
- *  Quality is a reading (fps), not a control. */
-export const PILL_TOOLS = ['monitores', 'qualidade', 'encerrar'] as const
+/** What the expanded pill holds: only tools that work ("em dúvida, remover", spec §6.3).
+ *  Arquivos came back in Stage 4 with the real send; chat, recording and voice return with
+ *  theirs. Quality is a reading (fps), not a control. */
+export const PILL_TOOLS = ['monitores', 'arquivos', 'qualidade', 'encerrar'] as const
 
 export interface KeyGate {
   /** The event's target is the remote screen (or nothing in particular: the page body). */

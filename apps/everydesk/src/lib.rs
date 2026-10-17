@@ -1,6 +1,7 @@
 mod cm;
 mod commands;
 mod contacts;
+mod files;
 mod server;
 mod session;
 pub mod memorable;
@@ -114,11 +115,13 @@ fn run() {
     librustdesk::ui_interface::start_option_status_sync();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // `_cm` first, so the host's first login finds it (`try_start_cm`) and the
             // engine never spawns a `--cm` window.
             cm::start(app.handle().clone());
             contacts::start(app.handle().clone());
+            files::start(app.handle());
             // As the Sciter GUI did in core_main: reuse a running `--server` over IPC,
             // otherwise start the host (IPC + rendezvous registration) in this process.
             std::thread::spawn(|| librustdesk::start_server(false, false));
@@ -134,6 +137,10 @@ fn run() {
             commands::session_key,
             commands::session_switch_display,
             commands::session_frame_ack,
+            files::session_send_files,
+            files::session_pick_and_send,
+            files::session_cancel_job,
+            files::session_override_answer,
             cm::cm_authorize,
             cm::cm_close,
             cm::cm_pending,

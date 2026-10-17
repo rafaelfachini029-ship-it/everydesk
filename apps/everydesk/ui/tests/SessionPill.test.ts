@@ -42,9 +42,9 @@ test('keys reach the remote only from the revealed screen, never from the pill o
   assert.equal(shouldForwardKey({ canvasFocused: true, pillFocused: false, revealed: true }), true)
 })
 
-test('the pill holds only tools that work: no "em breve" tools in Stage 3', () => {
-  assert.deepEqual([...PILL_TOOLS], ['monitores', 'qualidade', 'encerrar'])
-  for (const gone of ['conversa', 'arquivos', 'gravar', 'voz']) assert.ok(!(PILL_TOOLS as readonly string[]).includes(gone), gone)
+test('the pill holds only tools that work: no "em breve" tools', () => {
+  assert.deepEqual([...PILL_TOOLS], ['monitores', 'arquivos', 'qualidade', 'encerrar'])
+  for (const gone of ['conversa', 'gravar', 'voz']) assert.ok(!(PILL_TOOLS as readonly string[]).includes(gone), gone)
   const src = readFileSync(new URL('../src/lib/session/SessionPill.svelte', import.meta.url), 'utf8')
   assert.doesNotMatch(src, /em breve|SOON|icons\/(messages-square|folder|circle-dot|mic)'/)
   assert.match(src, />Encerrar</)

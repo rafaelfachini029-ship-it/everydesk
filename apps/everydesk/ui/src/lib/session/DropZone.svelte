@@ -1,32 +1,28 @@
 <!--
   DropZone — files dragged over the session (spec §6.2 moment 5).
   While files are dragged over the window the remote screen dims a little and a viewfinder
-  marks the whole screen as the destination ("Solte para enviar para Mãe"). A drop starts the
-  "em breve" trail inside the pill (FileTrail); Stage 3 reads and sends nothing.
+  marks the whole screen as the destination ("Solte para enviar para Mãe"). A drop sends the
+  files to the host (`session_send_files`, which picks its Desktop); the progress shows in the
+  pill's trail (FileTrail). A refused send (permission off, no destination yet) becomes the
+  trail's note.
   The layer is `pointer-events: none` at all times: drag events still reach the window
   through the canvas, and idle pointer input (canvas, pill dead zone) is never touched.
   Listens to both sources of drags: the DOM (browser, or Tauri with dragDropEnabled off)
   and Tauri's webview drag-drop events (the default in the app, which swallows the DOM ones).
+  Only the webview's drop carries real paths; a DOM drop sends only in the browser mock
+  (file names, simulated there), never inside Tauri.
   Props:
     peerId: string
-    onactivity?: () => void — keep the pill shown while the trail runs (peek)
+    onactivity?: () => void — show the pill, where the trail appears (peek)
 -->
 <script lang="ts">
-  import { invoke } from '@tauri-apps/api/core'
-  import { onDestroy, onMount } from 'svelte'
+  import { invoke, isTauri } from '@tauri-apps/api/core'
+  import { onMount } from 'svelte'
   import ArrowDownToLine from 'lucide-svelte/icons/arrow-down-to-line'
   import Icon from '../ui/Icon.svelte'
   import type { Contact } from '../policy.ts'
-  import {
-    TRAIL_FILL_MS,
-    TRAIL_NOTE_MS,
-    dragDepth,
-    dropTarget,
-    hasFiles,
-    overlayActive,
-    trail,
-    type DragStep,
-  } from './dropzone.ts'
+  import { dispatchJobs, sendFiles } from '../session'
+  import { SAME_DROP_MS, dragDepth, dropTarget, hasFiles, overlayActive, type DragStep } from './dropzone.ts'
 
   interface Props {
     peerId: string
@@ -40,27 +36,18 @@
   const on = $derived(overlayActive(depth) || native)
   const label = $derived(dropTarget(name, peerId))
 
-  let timers: ReturnType<typeof setTimeout>[] = []
   let lastDrop = 0
 
   function step(s: DragStep) {
     depth = dragDepth(depth, s)
   }
 
-  /** Visual only: the trail fills, the note shows, then everything fades. No file is read. */
-  function dropped() {
+  function dropped(paths: string[]) {
     const t = Date.now()
-    if (t - lastDrop < 300) return // the same drop seen by both sources
+    if (t - lastDrop < SAME_DROP_MS) return // the same drop seen by both sources
     lastDrop = t
-    timers.forEach(clearTimeout)
-    trail.set('fill')
     onactivity?.()
-    timers = [
-      setTimeout(() => trail.set('note'), TRAIL_FILL_MS),
-      // the pill hides 2 s after the last peek: keep it up until the note is read
-      ...[1000, 2000, 3000].map((ms) => setTimeout(() => onactivity?.(), ms)),
-      setTimeout(() => trail.set('idle'), TRAIL_FILL_MS + TRAIL_NOTE_MS),
-    ]
+    sendFiles(paths).catch((e) => dispatchJobs({ type: 'refused', message: String(e), at: Date.now() }))
   }
 
   function ondragenter(e: DragEvent) {
@@ -81,7 +68,8 @@
     if (!hasFiles(e.dataTransfer)) return
     e.preventDefault()
     step('drop')
-    dropped()
+    // Inside Tauri the webview's drop (with real paths) does the send.
+    if (!isTauri()) dropped([...(e.dataTransfer?.files ?? [])].map((f) => f.name))
   }
   const reset = () => step('reset')
 
@@ -106,7 +94,7 @@
           else if (p.type === 'leave') native = false
           else if (p.type === 'drop') {
             native = false
-            if (p.paths.length > 0) dropped()
+            if (p.paths.length > 0) dropped(p.paths)
           }
         }),
       )
@@ -123,10 +111,6 @@
       window.removeEventListener('dragend', reset)
       window.removeEventListener('blur', reset)
     }
-  })
-  onDestroy(() => {
-    timers.forEach(clearTimeout)
-    trail.set('idle')
   })
 </script>
 

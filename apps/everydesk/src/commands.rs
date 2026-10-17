@@ -50,6 +50,16 @@ fn with_session(f: impl FnOnce(&Session<TauriSessionHandler>)) {
     }
 }
 
+/// The running session and its generation (a cheap clone: every field is shared), for
+/// commands that must block (the file sender waits for the host) without holding the lock.
+pub(crate) fn current() -> Option<(u64, Session<TauriSessionHandler>)> {
+    SESSION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| (c.gen, c.session.clone()))
+}
+
 /// Sends `Data::Close` to the running session, if any (also used on window close), and
 /// makes it stale so its late events (timeout msgbox, displays...) are dropped.
 pub fn close_current() {

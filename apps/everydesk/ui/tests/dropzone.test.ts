@@ -1,13 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  TRAIL_FILL_MS,
-  TRAIL_NOTE_MS,
   dragDepth,
   dropTarget,
   hasFiles,
   overlayActive,
-  trailPhase,
   type DragStep,
 } from '../src/lib/session/dropzone.ts'
 
@@ -61,11 +58,3 @@ test('dropTarget names the contact, or the code', () => {
   assert.equal(dropTarget('  ', 'agua-lua-7'), 'Solte para enviar para agua-lua-7')
 })
 
-test('trail: fills, holds the note, then goes idle', () => {
-  assert.equal(trailPhase(-1), 'idle')
-  assert.equal(trailPhase(0), 'fill')
-  assert.equal(trailPhase(TRAIL_FILL_MS - 1), 'fill')
-  assert.equal(trailPhase(TRAIL_FILL_MS), 'note')
-  assert.equal(trailPhase(TRAIL_FILL_MS + TRAIL_NOTE_MS - 1), 'note')
-  assert.equal(trailPhase(TRAIL_FILL_MS + TRAIL_NOTE_MS), 'idle')
-})

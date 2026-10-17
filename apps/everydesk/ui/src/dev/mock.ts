@@ -23,6 +23,10 @@ mockIPC(
         return contacts
       case 'contacts_presence':
         return contacts.map((c) => [c.peer_id, c.online])
+      case 'session_send_files':
+        return simulateSend((args as { paths: string[] }).paths)
+      case 'session_pick_and_send':
+        return simulateSend(['Contrato assinado.pdf'])
       case 'session_connect':
         connecting((args as { frames: Channel<ArrayBuffer> }).frames)
         return null
@@ -84,7 +88,7 @@ if (location.hash === '#claro') {
 // /#aviso and /#senha-sessao: a session, then a notice / a password prompt over it (the
 // overlay is a modal dialog that owns the keyboard).
 const flow = location.hash.slice(1)
-const sessionFlow = flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao'
+const sessionFlow = flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
   const box = (kind: string, title: string, text: string) => emit('session:msgbox', { kind, title, text })
@@ -102,6 +106,17 @@ function connecting(frames: Channel<ArrayBuffer>) {
     let n = 0
     setInterval(() => emit('session:quality', { fps: 30 - (n % 3), delay: 32 + (n++ % 5), speed: null }), 1000)
     if (flow === 'aviso') at(1500, () => box('info', 'A outra máquina vai reiniciar', 'A sessão continua quando ela voltar.'))
+    // Moment 5: three sends in the pill's trail — one moving, one asking, one just done.
+    if (flow === 'arquivos')
+      at(1200, () => {
+        simulateSend(['Relatório anual 2026.pdf'], 0.62)
+        const ask = nextJob++
+        emit('session:job_added', { id: ask, name: 'fotos-natal.zip', to: '', total: 48e6 })
+        at(300, () => emit('session:override', { id: ask, file_num: 0, to: '', is_upload: true, is_identical: false }))
+        const done = nextJob++
+        emit('session:job_added', { id: done, name: 'planilha-contas.xlsx', to: '', total: 220e3 })
+        at(500, () => emit('session:job', { id: done, file_num: 0, kind: 'done', speed: 0, finished: 0, err: null }))
+      })
     if (flow === 'senha-sessao') at(1500, () => box('re-input-password', 'Digite a senha de novo', 'A senha mudou na outra máquina.'))
   }
   if (flow === 'revela') {
@@ -109,6 +124,30 @@ function connecting(frames: Channel<ArrayBuffer>) {
     at(2400, () => emit('session:connected'))
     at(3000, () => frames.onmessage(fakeFrame(1280, 800)))
   }
+}
+
+let nextJob = 1
+/** A fake upload per name: progress at ~1,2 MB/s, then done (`hold` = stop at that fraction). */
+function simulateSend(names: string[], hold?: number): number[] {
+  return names.map((name) => {
+    const id = nextJob++
+    const total = 18e6
+    emit('session:job_added', { id, name, to: `C:\\Users\\mae\\Desktop\\${name}`, total })
+    let sent = hold === undefined ? 0 : total * (hold - 0.08)
+    const t = setInterval(() => {
+      sent = Math.min(total, sent + 1.25e6 * 0.4)
+      if (hold !== undefined && sent >= total * hold) {
+        sent = total * hold
+        clearInterval(t)
+      }
+      emit('session:job', { id, file_num: 0, kind: 'progress', speed: 1.2 * 1024 * 1024, finished: sent, err: null })
+      if (sent >= total) {
+        clearInterval(t)
+        emit('session:job', { id, file_num: 0, kind: 'done', speed: 0, finished: 0, err: null })
+      }
+    }, 400)
+    return id
+  })
 }
 
 /** A frame packet (16-byte header + RGBA) with a soft diagonal gradient. */
@@ -130,7 +169,7 @@ function fakeFrame(w: number, h: number): ArrayBuffer {
   return buf
 }
 
-if (['busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao'].includes(flow))
+if (['busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return

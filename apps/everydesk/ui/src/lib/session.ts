@@ -4,6 +4,7 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { writable } from 'svelte/store'
+import { EMPTY as NO_JOBS, jobsReducer, type JobsAction, type JobsState } from './session/jobs.ts'
 
 export interface DisplayRect {
   x: number
@@ -40,8 +41,13 @@ export const displayList = writable<DisplayRect[]>([])
 /** Index of the display the frames currently come from. */
 export const currentDisplay = writable(0)
 
+/** File-send jobs in the pill's trail (`session/jobs.ts`). */
+export const jobs = writable<JobsState>(NO_JOBS)
+export const dispatchJobs = (a: JobsAction) => jobs.update((s) => jobsReducer(s, a))
+
 export function resetSessionState() {
   quality.set(NO_QUALITY)
+  jobs.set(NO_JOBS)
   displayList.set([])
   currentDisplay.set(0)
 }
@@ -272,12 +278,29 @@ export function sendKey(name: string, down: boolean, press: boolean, m: Modifier
   return invoke('session_key', { name, down, press, ...m })
 }
 
+// ---- files (spec §5.2: drop on the session → the host's Desktop) ---------------------
+
+/** One upload job per path; resolves to the job ids. Rejects with the reason to show. */
+export const sendFiles = (paths: string[]) => invoke<number[]>('session_send_files', { paths })
+/** "Arquivos" in the pill: the system picker, then the same send ([] when cancelled). */
+export const pickAndSend = () => invoke<number[]>('session_pick_and_send')
+export const cancelJob = (id: number) => invoke('session_cancel_job', { id })
+/** "Já existe. Substituir?": Sim = overwrite, Não = keep the host's file (only that file),
+ *  Sempre = overwrite this and the rest of the job. */
+export const answerOverride = (id: number, fileNum: number, overwrite: boolean, remember: boolean) =>
+  invoke('session_override_answer', { id, fileNum, overwrite, remember })
+
 export const EVENTS = {
   displays: 'session:displays',
   connected: 'session:connected',
   msgbox: 'session:msgbox',
   closed: 'session:closed',
   quality: 'session:quality',
+  jobAdded: 'session:job_added',
+  job: 'session:job',
+  override: 'session:override',
+  jobsCleared: 'session:jobs_cleared',
+  permission: 'session:permission',
 } as const
 
 /** What a person types after hearing a code, as the backend's `memorable::normalize`: trim,
