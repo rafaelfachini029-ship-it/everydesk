@@ -242,9 +242,10 @@ impl TauriSessionHandler {
         self.remote_home.lock().ok().and_then(|g| g.clone())
     }
 
-    /// Stores `path` as the host's home if this is a remote listing and none is stored yet.
-    fn note_folder(&self, path: &str, is_local: bool) {
-        if is_local {
+    /// Stores `path` as the host's home if this is a full remote listing and none is
+    /// stored yet. `only_count` events (sub-directory counts) and empty paths never count.
+    fn note_folder(&self, path: &str, is_local: bool, only_count: bool) {
+        if is_local || only_count || path.is_empty() {
             return;
         }
         if let Ok(mut g) = self.remote_home.lock() {
@@ -354,7 +355,7 @@ impl InvokeUiSession for TauriSessionHandler {
     }
 
     fn clear_all_jobs(&self) {
-        self.emit("session:jobs_cleared", ());
+        self.emit("session:jobs_cleared", serde_json::json!({}));
     }
 
     fn update_folder_files(
@@ -365,7 +366,7 @@ impl InvokeUiSession for TauriSessionHandler {
         is_local: bool,
         only_count: bool,
     ) {
-        self.note_folder(&path, is_local);
+        self.note_folder(&path, is_local, only_count);
         self.emit(
             "session:folder",
             FolderEvent { id, path, is_local, only_count, count: entries.len() },
@@ -568,6 +569,26 @@ mod tests {
         assert_eq!(h.remote_home().as_deref(), Some("/Users/host")); // first wins
         let clone = h.clone(); // the session's handler clones share the state
         assert_eq!(clone.remote_home().as_deref(), Some("/Users/host"));
+    }
+
+    #[test]
+    fn only_count_folder_does_not_set_remote_home() {
+        let h = TauriSessionHandler::default();
+        h.update_folder_files(0, &vec![], "/Users/host/Docs/sub".into(), false, true);
+        assert_eq!(h.remote_home(), None); // count-only listing of a sub-dir
+        h.update_folder_files(0, &vec![], String::new(), false, false);
+        assert_eq!(h.remote_home(), None); // empty path
+        h.update_folder_files(0, &vec![], "/Users/host".into(), false, false);
+        assert_eq!(h.remote_home().as_deref(), Some("/Users/host"));
+    }
+
+    #[test]
+    fn new_handler_resets_remote_home() {
+        let old = TauriSessionHandler::default();
+        old.update_folder_files(0, &vec![], "/Users/host".into(), false, false);
+        assert!(old.remote_home().is_some());
+        // A new connection builds a fresh handler: nothing carried over.
+        assert_eq!(TauriSessionHandler::default().remote_home(), None);
     }
 
     #[test]
