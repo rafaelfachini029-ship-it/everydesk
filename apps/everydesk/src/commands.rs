@@ -309,6 +309,30 @@ pub fn session_lock() -> Result<(), String> {
     Ok(())
 }
 
+/// Longest chat message, in characters (the engine has no limit of its own).
+pub const CHAT_MAX_CHARS: usize = 4000;
+
+/// A chat message as it goes out: trimmed, not empty, at most `CHAT_MAX_CHARS` characters.
+/// Shared by both sides (`session_send_chat`, `cm::cm_send_chat`).
+pub fn chat_text(text: &str) -> Result<String, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Err("Mensagem vazia".to_owned());
+    }
+    if t.chars().count() > CHAT_MAX_CHARS {
+        return Err(format!("Mensagem longa demais (até {CHAT_MAX_CHARS} caracteres)"));
+    }
+    Ok(t.to_owned())
+}
+
+/// Sends a chat message to the host of the running session.
+#[tauri::command]
+pub fn session_send_chat(text: String) -> Result<(), String> {
+    let t = chat_text(&text)?;
+    require_session()?.send_chat(t);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +387,17 @@ mod tests {
         assert_eq!(clamp_fps(0), 5);
         assert_eq!(clamp_fps(30), 30);
         assert_eq!(clamp_fps(240), 60);
+    }
+
+    #[test]
+    fn chat_text_is_trimmed_and_bounded() {
+        assert_eq!(chat_text("  oi  \n").unwrap(), "oi");
+        assert!(chat_text("").is_err());
+        assert!(chat_text(" \n\t ").is_err());
+        let max = "é".repeat(CHAT_MAX_CHARS);
+        assert_eq!(chat_text(&max).unwrap(), max);
+        assert!(chat_text(&format!("{max}a")).is_err());
+        // inner newlines stay (Shift+Enter)
+        assert_eq!(chat_text("a\nb").unwrap(), "a\nb");
     }
 }

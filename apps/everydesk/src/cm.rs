@@ -13,13 +13,20 @@
 //! needs administrator rights; "ask" shows the card once per episode, "auto" means the
 //! remembered choice already asked Windows for it, "done" means the elevated helper runs or
 //! is no longer needed).
+//! `cm:chat {conn_id, text, at, mine: false}` (a chat message from the controller `conn_id`;
+//! `at` = unix ms on receipt). The last `CHAT_KEEP` messages of each connection, both ways,
+//! come back in `cm_pending` (`chats`); `cm_send_chat` answers.
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
 use crate::contacts::PolicyView;
 use librustdesk::everydesk::pairings::{IdentityState, Policy};
 use serde::Serialize;
-use std::{collections::BTreeMap, sync::Mutex, time::Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Mutex,
+    time::Instant,
+};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Clone)]
@@ -121,6 +128,21 @@ pub struct CmState {
     identities: BTreeMap<i32, Identity>,
     reconfirms: BTreeMap<i32, (Reconfirm, Instant)>,
     elevation: Elevation,
+    chats: BTreeMap<i32, VecDeque<CmChat>>,
+}
+
+/// Chat messages kept per connection for `cm_pending` hydration.
+pub const CHAT_KEEP: usize = 50;
+
+/// `cm:chat`, and one entry of `CmSnapshot::chats`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CmChat {
+    pub conn_id: i32,
+    pub text: String,
+    /// Unix ms.
+    pub at: u64,
+    /// Sent from this machine (a reply), not received.
+    pub mine: bool,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -149,6 +171,8 @@ pub struct CmSnapshot {
     pub identities: Vec<Identity>,
     /// Unanswered reconfirmation rings.
     pub reconfirms: Vec<ReconfirmSnapshot>,
+    /// Recent chat messages (both ways), per connection in order, `CHAT_KEEP` at most each.
+    pub chats: Vec<CmChat>,
 }
 
 impl CmState {
@@ -209,6 +233,16 @@ impl CmState {
         self.offers.remove(&conn_id);
         self.identities.remove(&conn_id);
         self.reconfirms.remove(&conn_id);
+        self.chats.remove(&conn_id);
+    }
+
+    /// Keeps a chat message (the oldest of the connection goes past `CHAT_KEEP`).
+    pub fn chat(&mut self, m: CmChat) {
+        let q = self.chats.entry(m.conn_id).or_default();
+        q.push_back(m);
+        while q.len() > CHAT_KEEP {
+            q.pop_front();
+        }
     }
 
     pub fn snapshot(&self, now: Instant) -> CmSnapshot {
@@ -232,6 +266,7 @@ impl CmState {
                     age_ms: now.saturating_duration_since(*at).as_millis() as u64,
                 })
                 .collect(),
+            chats: self.chats.values().flatten().cloned().collect(),
         }
     }
 }
@@ -399,8 +434,17 @@ impl InvokeUiCM for TauriCM {
         }
     }
 
-    // TODO etapa 3/4: chat, theme, language, voice call, file transfer log.
-    fn new_message(&self, _id: i32, _text: String) {}
+    // TODO etapa 3/4: theme, language, voice call, file transfer log.
+    fn new_message(&self, id: i32, text: String) {
+        let m = CmChat {
+            conn_id: id,
+            text,
+            at: crate::session::unix_ms(),
+            mine: false,
+        };
+        with_state(|s| s.chat(m.clone()));
+        self.emit("cm:chat", m);
+    }
     fn change_theme(&self, _dark: String) {}
     fn change_language(&self) {}
     fn show_elevation(&self, show: bool) {
@@ -580,6 +624,25 @@ pub fn cm_elevation_pending() -> Option<i32> {
 pub fn cm_close(conn_id: i32) {
     log::info!("everydesk: close #{conn_id}");
     ui_cm_interface::close(conn_id);
+}
+
+/// Answers the controller `conn_id` in chat. Kept for `cm_pending` as `mine`.
+#[tauri::command]
+pub fn cm_send_chat(conn_id: i32, text: String) -> Result<(), String> {
+    let text = crate::commands::chat_text(&text)?;
+    if !with_state(|s| s.connected.contains_key(&conn_id)) {
+        return Err("Essa conexão já terminou".to_owned());
+    }
+    ui_cm_interface::send_chat(conn_id, text.clone());
+    with_state(|s| {
+        s.chat(CmChat {
+            conn_id,
+            text,
+            at: crate::session::unix_ms(),
+            mine: true,
+        })
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -781,5 +844,28 @@ mod tests {
         s.ring(Reconfirm { conn_id: 1, ring_secs: 60 }, t0);
         s.remove(1);
         assert_eq!(s.snapshot(t0), CmSnapshot::default());
+    }
+
+    #[test]
+    fn chats_are_kept_per_connection_and_capped() {
+        let mut s = CmState::default();
+        let m = |conn_id, i: u64, mine| CmChat {
+            conn_id,
+            text: format!("m{i}"),
+            at: i,
+            mine,
+        };
+        for i in 0..(CHAT_KEEP as u64 + 5) {
+            s.chat(m(1, i, i % 2 == 0));
+        }
+        s.chat(m(2, 0, false));
+        let snap = s.snapshot(Instant::now());
+        assert_eq!(snap.chats.len(), CHAT_KEEP + 1);
+        assert_eq!(snap.chats[0].text, "m5");
+        assert_eq!(snap.chats[CHAT_KEEP - 1].text, format!("m{}", CHAT_KEEP + 4));
+        s.remove(1);
+        let snap = s.snapshot(Instant::now());
+        assert_eq!(snap.chats.len(), 1);
+        assert_eq!(snap.chats[0].conn_id, 2);
     }
 }

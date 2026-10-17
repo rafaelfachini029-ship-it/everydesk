@@ -9,6 +9,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
   import Button from '../ui/Button.svelte'
+  import HostChat from './HostChat.svelte'
   import { applyCm, badgeLabel, sessions } from './badge.ts'
 
   /** conn_id → why "Encerrar" failed; the badge stays (the access is still on). */
@@ -42,6 +43,7 @@
         <strong class:code={!named}>{badgeLabel(c)}</strong>
         <span class="verb">está acessando</span>
       </span>
+      <HostChat conn={c} />
       <Button variant="danger" onclick={() => end(c.conn_id)}>Encerrar</Button>
       {#if failed[c.conn_id]}<span class="err" role="alert">{failed[c.conn_id]}</span>{/if}
     </div>

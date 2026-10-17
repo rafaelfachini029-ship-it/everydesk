@@ -50,6 +50,10 @@ mockIPC(
         toggles[name] = !toggles[name]
         return toggles[name]
       }
+      // Conversa (/#conversa, /#conversa-host): sending always works here.
+      case 'session_send_chat':
+      case 'cm_send_chat':
+        return null
       case 'session_connect':
         connecting((args as { frames: Channel<ArrayBuffer> }).frames)
         return null
@@ -74,7 +78,7 @@ mockIPC(
         return {
           pending: [],
           connected:
-            location.hash === '#conectado'
+            location.hash === '#conectado' || location.hash === '#conversa-host'
               ? [
                   { conn_id: 1, peer_id: 'agua-lua-7', name: 'Mãe' },
                   { conn_id: 2, peer_id: 'pedra-gaviao-90', name: '' },
@@ -83,6 +87,14 @@ mockIPC(
           offers: [],
           identities: [],
           reconfirms: [],
+          // /#conversa-host: Mãe asked something, got an answer, and asked again.
+          chats:
+            location.hash === '#conversa-host'
+              ? [
+                  { conn_id: 1, text: 'Oi, filho! A impressora parou de novo.', at: Date.now() - 240e3, mine: false },
+                  { conn_id: 1, text: 'Já estou olhando, mãe.', at: Date.now() - 180e3, mine: true },
+                ]
+              : [],
         }
       default:
         return null
@@ -111,7 +123,7 @@ if (location.hash === '#claro') {
 // /#aviso and /#senha-sessao: a session, then a notice / a password prompt over it (the
 // overlay is a modal dialog that owns the keyboard).
 const flow = location.hash.slice(1)
-const sessionFlow = flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
+const sessionFlow = flow === 'conversa' || flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
   const box = (kind: string, title: string, text: string) => emit('session:msgbox', { kind, title, text })
@@ -144,6 +156,28 @@ function connecting(frames: Channel<ArrayBuffer>) {
       at(900, () => emit('session:permission', { name: 'restart', value: false }))
       at(2600, () => document.querySelector<HTMLElement>('.dock .pill')?.focus())
       at(2900, () => document.querySelector<HTMLButtonElement>('.more .tool')?.click())
+    }
+    // Moment 6 (controller): Mãe writes, the pill comes down with the preview; then the panel
+    // opens and an answer goes out.
+    if (flow === 'conversa') {
+      const said = (ms: number, text: string) => at(ms, () => emit('session:chat', { text, at: Date.now() }))
+      said(1200, 'Oi! Você já está vendo minha tela?')
+      at(4200, () => document.querySelector<HTMLElement>('.dock .pill')?.focus())
+      at(4400, () => document.querySelector<HTMLButtonElement>('.chat .tool')?.click())
+      at(4900, () => {
+        const f = document.querySelector<HTMLTextAreaElement>('.chat textarea')
+        if (!f) return
+        f.value = 'Estou sim. Vou abrir as configurações da impressora.'
+        f.dispatchEvent(new Event('input', { bubbles: true }))
+        f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      })
+      said(5600, 'Tá bom! Ela fica no escritório,\nperto da janela.')
+      at(6000, () => {
+        const f = document.querySelector<HTMLTextAreaElement>('.chat textarea')
+        if (!f) return
+        f.value = 'Achei. Já'
+        f.dispatchEvent(new Event('input', { bubbles: true }))
+      })
     }
     if (flow === 'senha-sessao') at(1500, () => box('re-input-password', 'Digite a senha de novo', 'A senha mudou na outra máquina.'))
   }
@@ -198,7 +232,11 @@ function fakeFrame(w: number, h: number): ArrayBuffer {
   return buf
 }
 
-if (['busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
+// Moment 6 (host): a new message arrives while the owner looks at the badge.
+if (flow === 'conversa-host')
+  setTimeout(() => emit('cm:chat', { conn_id: 1, text: 'Ela voltou a imprimir! Obrigada ❤', at: Date.now(), mine: false }), 2000)
+
+if (['conversa', 'busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return

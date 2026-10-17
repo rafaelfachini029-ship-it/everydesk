@@ -27,6 +27,7 @@
   import Pill from '../ui/Pill.svelte'
   import FileTrail from './FileTrail.svelte'
   import MorePanel from './MorePanel.svelte'
+  import ChatPanel from './ChatPanel.svelte'
   import { VIEW_ONLY_FILES, filesAllowed, qualityLabel } from './more.ts'
   import type { Contact } from '../policy.ts'
   import { currentDisplay, dispatchJobs, displayList, extras, jobs, pickAndSend, quality, switchDisplay } from '../session'
@@ -219,6 +220,7 @@
           <span class="sr-only">Qualidade {level}{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
         </span>
 
+        <ChatPanel active={expanded} {onreturn} who={name ?? peerId} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
         <MorePanel active={expanded} {onreturn} />
         <span class="rule" aria-hidden="true"></span>
         <Button variant="danger" icon={PhoneOff} onclick={onend}>Encerrar</Button>
