@@ -117,6 +117,17 @@ fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // The only source of paths `session_send_files` accepts: what the OS handed the window.
+        .on_window_event(|_w, e| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = e {
+                files::register_dropped_paths(paths);
+            }
+        })
+        .on_webview_event(|_w, e| {
+            if let tauri::WebviewEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = e {
+                files::register_dropped_paths(paths);
+            }
+        })
         .setup(|app| {
             // `_cm` first, so the host's first login finds it (`try_start_cm`) and the
             // engine never spawns a `--cm` window.
@@ -156,6 +167,8 @@ fn run() {
             cm::cm_send_chat,
             cm::cm_voice_answer,
             cm::cm_voice_close,
+            cm::cm_get_permissions,
+            cm::cm_set_permission,
             contacts::contacts_list,
             contacts::contacts_set_policy,
             contacts::contacts_remove,

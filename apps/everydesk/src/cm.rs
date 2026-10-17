@@ -21,12 +21,17 @@
 //! or on come back in `cm_pending` (`voices`); `cm_voice_answer` / `cm_voice_close` answer.
 //! `cm:record {conn_id, on}` (the controller `conn_id` started / stopped recording this
 //! session). Connections recording now come back in `cm_pending` (`records`).
+//! `cm:file {conn_id, id, name, size, state: "started"|"done"|"cancelled"|"error", at}` (a file
+//! or folder the controller `conn_id` is sending here; one event per state change, never per
+//! progress tick). The last `FILES_KEEP` come back in `cm_pending` (`files`).
+//! Host permissions (settings): `cm_get_permissions` / `cm_set_permission(name, on)` for
+//! `file`, `audio`, `recording`, `clipboard` — the engine options, applied to live sessions too.
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
 use crate::contacts::PolicyView;
 use librustdesk::everydesk::pairings::{IdentityState, Policy};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Mutex,
@@ -136,6 +141,99 @@ pub struct CmState {
     chats: BTreeMap<i32, VecDeque<CmChat>>,
     voices: BTreeMap<i32, CmVoice>,
     recording: BTreeSet<i32>,
+    files: VecDeque<CmFile>,
+    /// Transfers seen started and not ended yet, (conn_id, job id).
+    files_live: BTreeSet<(i32, i32)>,
+}
+
+/// Transfers kept for `cm_pending` hydration.
+pub const FILES_KEEP: usize = 20;
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FileState {
+    Started,
+    Done,
+    Cancelled,
+    Error,
+}
+
+/// `cm:file`, and one entry of `CmSnapshot::files`.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct CmFile {
+    pub conn_id: i32,
+    /// The engine's job id (per connection).
+    pub id: i32,
+    /// File (or folder) name, without its folder on this machine.
+    pub name: String,
+    /// Bytes (the whole job).
+    pub size: u64,
+    pub state: FileState,
+    /// Unix ms.
+    pub at: u64,
+}
+
+/// One job of the engine's "transfer" log (`fs::serialize_transfer_jobs` → an array, or
+/// `fs::serialize_transfer_job` → one object with `done`/`cancel`/`error`). Only what the
+/// badge needs; everything else in the JSON is ignored.
+#[derive(Deserialize, Debug, Default, PartialEq)]
+pub struct LogJob {
+    #[serde(default)]
+    pub id: i32,
+    #[serde(default)]
+    pub conn_id: i32,
+    /// Local path on this machine (where the upload is written).
+    #[serde(default)]
+    pub data_source: String,
+    #[serde(default)]
+    pub remote: String,
+    #[serde(default)]
+    pub total_size: u64,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub cancel: bool,
+    #[serde(default)]
+    pub error: String,
+}
+
+impl LogJob {
+    pub fn state(&self) -> FileState {
+        if self.cancel {
+            FileState::Cancelled
+        } else if !self.error.is_empty() {
+            FileState::Error
+        } else if self.done {
+            FileState::Done
+        } else {
+            FileState::Started
+        }
+    }
+
+    /// Last component of the path, either separator (a Windows path read anywhere).
+    pub fn name(&self) -> String {
+        let last = |p: &str| {
+            p.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_owned()
+        };
+        let n = last(&self.data_source);
+        if !n.is_empty() {
+            return n;
+        }
+        let n = last(&self.remote);
+        if n.is_empty() { "arquivo".to_owned() } else { n }
+    }
+}
+
+/// The jobs in one "transfer" log; anything unreadable is no job.
+pub fn parse_transfer_log(log: &str) -> Vec<LogJob> {
+    if let Ok(v) = serde_json::from_str::<Vec<LogJob>>(log) {
+        return v;
+    }
+    serde_json::from_str::<LogJob>(log).map(|j| vec![j]).unwrap_or_default()
 }
 
 /// `cm:record`, and one entry of `CmSnapshot::records` (always `on` there).
@@ -212,6 +310,8 @@ pub struct CmSnapshot {
     pub voices: Vec<CmVoice>,
     /// Controllers recording now.
     pub records: Vec<CmRecord>,
+    /// Recent transfers to this machine, oldest first, `FILES_KEEP` at most.
+    pub files: Vec<CmFile>,
 }
 
 impl CmState {
@@ -275,6 +375,43 @@ impl CmState {
         self.chats.remove(&conn_id);
         self.voices.remove(&conn_id);
         self.recording.remove(&conn_id);
+        self.files.retain(|f| f.conn_id != conn_id);
+        self.files_live.retain(|(c, _)| *c != conn_id);
+    }
+
+    /// A job seen in a transfer log. Some(event) only when its state changes: the engine
+    /// repeats the running jobs on every progress tick, which says nothing new (throttle).
+    pub fn file_log(&mut self, j: &LogJob, at: u64) -> Option<CmFile> {
+        let key = (j.conn_id, j.id);
+        let state = j.state();
+        if state == FileState::Started {
+            if !self.files_live.insert(key) {
+                return None;
+            }
+        } else {
+            let was_live = self.files_live.remove(&key);
+            // an end already told (the engine may log a cancel after the error, or twice)
+            let told = self
+                .files
+                .iter()
+                .any(|f| (f.conn_id, f.id) == key && f.state != FileState::Started);
+            if told && !was_live {
+                return None;
+            }
+        }
+        let f = CmFile {
+            conn_id: j.conn_id,
+            id: j.id,
+            name: j.name(),
+            size: j.total_size,
+            state,
+            at,
+        };
+        self.files.push_back(f.clone());
+        while self.files.len() > FILES_KEEP {
+            self.files.pop_front();
+        }
+        Some(f)
     }
 
     /// The controller of `r.conn_id` started / stopped recording.
@@ -332,6 +469,7 @@ impl CmState {
                 .iter()
                 .map(|&conn_id| CmRecord { conn_id, on: true })
                 .collect(),
+            files: self.files.iter().cloned().collect(),
         }
     }
 }
@@ -503,7 +641,7 @@ impl InvokeUiCM for TauriCM {
     fn new_message(&self, id: i32, text: String) {
         let m = CmChat {
             conn_id: id,
-            text,
+            text: crate::commands::cap_incoming(&text),
             at: crate::session::unix_ms(),
             mine: false,
         };
@@ -531,7 +669,19 @@ impl InvokeUiCM for TauriCM {
         with_state(|s| s.voice(v));
         self.emit("cm:voice", v);
     }
-    fn file_transfer_log(&self, _action: &str, _log: &str) {}
+    fn file_transfer_log(&self, action: &str, log: &str) {
+        if action != "transfer" {
+            log::debug!("everydesk: file log {action} ignored");
+            return;
+        }
+        let at = crate::session::unix_ms();
+        let jobs = parse_transfer_log(log);
+        let events: Vec<CmFile> = with_state(|s| jobs.iter().filter_map(|j| s.file_log(j, at)).collect());
+        for f in events {
+            log::info!("everydesk: file #{} job {} {:?} ({} bytes)", f.conn_id, f.id, f.state, f.size);
+            self.emit("cm:file", f);
+        }
+    }
 
     fn record_status(&self, id: i32, recording: bool) {
         let r = CmRecord { conn_id: id, on: recording };
@@ -737,9 +887,161 @@ pub fn cm_voice_close(conn_id: i32) {
     ui_cm_interface::close_voice_call(conn_id);
 }
 
+// ---- host permissions (settings) ------------------------------------------------------
+
+/// UI name (also the engine's `switch_permission` name) → engine option.
+pub const PERMISSIONS: [(&str, &str); 4] = [
+    ("file", "enable-file-transfer"),
+    ("audio", "enable-audio"),
+    ("recording", "enable-record-session"),
+    ("clipboard", "enable-clipboard"),
+];
+
+pub fn permission_option(name: &str) -> Option<&'static str> {
+    PERMISSIONS.iter().find(|(n, _)| *n == name).map(|(_, o)| *o)
+}
+
+/// The engine's convention for `enable-*` options (`config::option2bool`): anything but "N"
+/// is on, and on is stored as "" (the default).
+pub fn option_value(on: bool) -> &'static str {
+    if on { "" } else { "N" }
+}
+
+pub fn option_on(value: &str) -> bool {
+    value != "N"
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Permissions {
+    pub file: bool,
+    pub audio: bool,
+    pub recording: bool,
+    pub clipboard: bool,
+}
+
+pub fn permissions_from(get: impl Fn(&str) -> String) -> Permissions {
+    let on = |name| option_on(&get(permission_option(name).unwrap_or_default()));
+    Permissions {
+        file: on("file"),
+        audio: on("audio"),
+        recording: on("recording"),
+        clipboard: on("clipboard"),
+    }
+}
+
+/// The four host switches: "Receber arquivos", "Compartilhar o som", "Permitir gravar",
+/// "Área de transferência".
+#[tauri::command]
+pub fn cm_get_permissions() -> Permissions {
+    permissions_from(|k| Config::get_option(k))
+}
+
+/// Flips one host switch: stored for the next sessions and applied to every session on now
+/// (the engine stops a running file job when `file` goes off).
+#[tauri::command]
+pub fn cm_set_permission(name: String, on: bool) -> Result<(), String> {
+    let opt = permission_option(&name).ok_or_else(|| format!("Permissão desconhecida: {name}"))?;
+    log::info!("everydesk: permission {name} -> {on}");
+    Config::set_option(opt.to_owned(), option_value(on).to_owned());
+    let live: Vec<i32> = with_state(|s| s.connected.keys().copied().collect());
+    for id in live {
+        ui_cm_interface::switch_permission(id, name.clone(), on);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_options_follow_the_engine() {
+        assert_eq!(permission_option("file"), Some("enable-file-transfer"));
+        assert_eq!(permission_option("audio"), Some("enable-audio"));
+        assert_eq!(permission_option("recording"), Some("enable-record-session"));
+        assert_eq!(permission_option("clipboard"), Some("enable-clipboard"));
+        assert_eq!(permission_option("keyboard"), None);
+        assert_eq!(permission_option(""), None);
+        // the engine's own names and reading of the value
+        use base::config::keys;
+        use hbb_common::config::option2bool;
+        assert_eq!(permission_option("file"), Some(keys::OPTION_ENABLE_FILE_TRANSFER));
+        assert_eq!(permission_option("audio"), Some(keys::OPTION_ENABLE_AUDIO));
+        assert_eq!(permission_option("recording"), Some(keys::OPTION_ENABLE_RECORD_SESSION));
+        assert_eq!(permission_option("clipboard"), Some(keys::OPTION_ENABLE_CLIPBOARD));
+        for (_, opt) in PERMISSIONS {
+            for on in [true, false] {
+                assert_eq!(option2bool(opt, option_value(on)), on, "{opt} {on}");
+                assert_eq!(option_on(option_value(on)), on);
+            }
+            assert!(option_on("")); // never set: on (the engine's default)
+            assert!(option2bool(opt, "Y"));
+        }
+        let p = permissions_from(|k| if k == "enable-audio" { "N".into() } else { String::new() });
+        assert_eq!(
+            p,
+            Permissions { file: true, audio: false, recording: true, clipboard: true }
+        );
+        assert!(cm_set_permission("keyboard".into(), false).is_err());
+    }
+
+    #[test]
+    fn transfer_log_parses_both_shapes() {
+        // fs::serialize_transfer_jobs: an array of running jobs
+        let arr = r#"[{"id":3,"type":"Generic","remote":"","data_source":"/Users/m/Desktop/foto.jpg","show_hidden":false,"is_remote":false,"is_last_job":false,"is_resume":false,"file_num":0,"conn_id":7,"total_size":2202009,"finished_size":0,"transferred":100}]"#;
+        let jobs = parse_transfer_log(arr);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!((jobs[0].id, jobs[0].conn_id, jobs[0].total_size), (3, 7, 2202009));
+        assert_eq!(jobs[0].name(), "foto.jpg");
+        assert_eq!(jobs[0].state(), FileState::Started);
+        // fs::serialize_transfer_job: one ended job
+        let one = r#"{"id":3,"conn_id":7,"data_source":"C:\\Users\\m\\Desktop\\Pasta\\","total_size":5,"done":true,"cancel":false,"error":""}"#;
+        let j = &parse_transfer_log(one)[0];
+        assert_eq!((j.state(), j.name().as_str()), (FileState::Done, "Pasta"));
+        let c = &parse_transfer_log(r#"{"id":1,"cancel":true,"error":""}"#)[0];
+        assert_eq!((c.state(), c.name().as_str()), (FileState::Cancelled, "arquivo"));
+        let e = &parse_transfer_log(r#"{"id":1,"done":false,"cancel":false,"error":"disk full"}"#)[0];
+        assert_eq!(e.state(), FileState::Error);
+        assert!(parse_transfer_log("not json").is_empty());
+        assert!(parse_transfer_log("[]").is_empty());
+    }
+
+    #[test]
+    fn file_log_tells_each_state_once_and_keeps_the_last_20() {
+        let mut s = CmState::default();
+        let job = |id, done, cancel, error: &str| LogJob {
+            id,
+            conn_id: 7,
+            data_source: format!("/h/Desktop/f{id}.txt"),
+            total_size: 10,
+            done,
+            cancel,
+            error: error.into(),
+            ..Default::default()
+        };
+        let started = s.file_log(&job(1, false, false, ""), 1).unwrap();
+        assert_eq!((started.state, started.name.as_str()), (FileState::Started, "f1.txt"));
+        // progress ticks repeat the running job: nothing new
+        assert_eq!(s.file_log(&job(1, false, false, ""), 2), None);
+        assert_eq!(s.file_log(&job(1, true, false, ""), 3).unwrap().state, FileState::Done);
+        assert_eq!(s.file_log(&job(1, true, false, ""), 4), None);
+        // a revoked permission: the engine cancels the running job
+        s.file_log(&job(2, false, false, ""), 5).unwrap();
+        assert_eq!(s.file_log(&job(2, false, true, ""), 6).unwrap().state, FileState::Cancelled);
+        // a job that only shows up ended is still told
+        assert_eq!(s.file_log(&job(3, false, false, "x"), 7).unwrap().state, FileState::Error);
+        assert_eq!(s.snapshot(Instant::now()).files.len(), 5);
+        for id in 10..40 {
+            s.file_log(&job(id, false, false, ""), 8);
+        }
+        let snap = s.snapshot(Instant::now());
+        assert_eq!(snap.files.len(), FILES_KEEP);
+        assert_eq!(snap.files.last().unwrap().id, 39);
+        // the connection goes: its transfers go too
+        s.remove(7);
+        assert!(s.snapshot(Instant::now()).files.is_empty());
+        assert!(s.files_live.is_empty());
+    }
 
     #[test]
     fn approve_mode_is_forced_to_click() {

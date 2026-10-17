@@ -12,7 +12,7 @@ use librustdesk::ui_session_interface::InvokeUiSession;
 use scrap::{ImageFormat, ImageRgb};
 use serde::Serialize;
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use tauri::{
@@ -200,6 +200,9 @@ pub struct TauriSessionHandler {
     /// Host's home dir: the path of the first remote (`is_local == false`) folder listing,
     /// which is the home directory the engine requests when file transfer opens.
     remote_home: Arc<Mutex<Option<String>>>,
+    /// Index of the display the frames come from (peer info, `switch_display`, or the
+    /// controller's own `session_switch_display`), for `session_record`'s key frame.
+    current_display: Arc<AtomicI32>,
 }
 
 impl TauriSessionHandler {
@@ -210,7 +213,17 @@ impl TauriSessionHandler {
             in_flight: Default::default(),
             gen,
             remote_home: Default::default(),
+            current_display: Default::default(),
         }
+    }
+
+    /// The display the frames currently come from (0 before the peer said otherwise).
+    pub fn current_display(&self) -> i32 {
+        self.current_display.load(Ordering::Acquire)
+    }
+
+    pub fn set_current(&self, display: i32) {
+        self.current_display.store(display.max(0), Ordering::Release);
     }
 
     pub fn is_current(&self) -> bool {
@@ -305,6 +318,7 @@ impl InvokeUiSession for TauriSessionHandler {
     }
 
     fn set_peer_info(&self, peer_info: &PeerInfo) {
+        self.set_current(peer_info.current_display);
         self.emit_displays(&peer_info.displays);
     }
 
@@ -400,7 +414,8 @@ impl InvokeUiSession for TauriSessionHandler {
     }
 
     fn new_message(&self, msg: String) {
-        self.emit("session:chat", ChatEvent { text: msg, at: unix_ms() });
+        let text = crate::commands::cap_incoming(&msg);
+        self.emit("session:chat", ChatEvent { text, at: unix_ms() });
     }
 
     fn on_voice_call_waiting(&self) {
@@ -430,7 +445,9 @@ impl InvokeUiSession for TauriSessionHandler {
     fn set_cursor_position(&self, _cp: CursorPosition) {}
     fn set_display(&self, _x: i32, _y: i32, _w: i32, _h: i32, _cursor_embedded: bool, _scale: f64) {
     }
-    fn switch_display(&self, _display: &SwitchDisplay) {}
+    fn switch_display(&self, display: &SwitchDisplay) {
+        self.set_current(display.display);
+    }
     fn set_platform_additions(&self, _data: &str) {}
     fn update_privacy_mode(&self) {}
     fn close_success(&self) {}
@@ -445,7 +462,9 @@ impl InvokeUiSession for TauriSessionHandler {
     }
     fn next_rgba(&self, _display: usize) {}
     fn set_multiple_windows_session(&self, _sessions: Vec<WindowsSession>) {}
-    fn set_current_display(&self, _disp_idx: i32) {}
+    fn set_current_display(&self, disp_idx: i32) {
+        self.set_current(disp_idx);
+    }
     fn printer_request(&self, _id: i32, _path: String) {}
     fn handle_screenshot_resp(&self, _sid: String, _msg: String) {}
     fn handle_terminal_response(&self, _response: TerminalResponse) {}

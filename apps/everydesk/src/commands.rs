@@ -172,7 +172,10 @@ pub fn session_key(
 
 #[tauri::command]
 pub fn session_switch_display(index: usize) {
-    with_session(|s| s.switch_display(index as i32));
+    with_session(|s| {
+        s.ui_handler.set_current(index as i32);
+        s.switch_display(index as i32);
+    });
 }
 
 /// The webview drew a frame packet; lets `on_rgba` send the next one.
@@ -325,6 +328,15 @@ pub fn chat_text(text: &str) -> Result<String, String> {
     Ok(t.to_owned())
 }
 
+/// A received chat message as kept and shown: past `CHAT_MAX_CHARS` characters it is cut and
+/// ends in "…" (the other side may run anything; the engine has no limit of its own).
+pub fn cap_incoming(text: &str) -> String {
+    match text.char_indices().nth(CHAT_MAX_CHARS) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
 /// Sends a chat message to the host of the running session.
 #[tauri::command]
 pub fn session_send_chat(text: String) -> Result<(), String> {
@@ -354,10 +366,15 @@ pub fn session_voice(start: bool) -> Result<(), String> {
 pub fn session_record(start: bool) -> Result<(), String> {
     let s = require_session()?;
     if start {
-        s.refresh_video(0);
+        s.refresh_video(record_display(s.ui_handler.current_display()));
     }
     s.record_screen(start);
     Ok(())
+}
+
+/// The display whose key frame opens a recording: the one on screen now (never negative).
+pub fn record_display(current: i32) -> i32 {
+    current.max(0)
 }
 
 /// Whether the running session is recording (false without a session).
@@ -420,6 +437,31 @@ mod tests {
         assert_eq!(clamp_fps(0), 5);
         assert_eq!(clamp_fps(30), 30);
         assert_eq!(clamp_fps(240), 60);
+    }
+
+    #[test]
+    fn recording_starts_on_the_display_on_screen() {
+        assert_eq!(record_display(0), 0);
+        assert_eq!(record_display(2), 2);
+        assert_eq!(record_display(-1), 0);
+        // the handler keeps what switch_display / peer info said
+        let h = TauriSessionHandler::default();
+        assert_eq!(record_display(h.current_display()), 0);
+        h.set_current(1);
+        assert_eq!(record_display(h.current_display()), 1);
+        h.set_current(-3);
+        assert_eq!(record_display(h.current_display()), 0);
+    }
+
+    #[test]
+    fn incoming_chat_is_capped() {
+        assert_eq!(cap_incoming("oi"), "oi");
+        let max = "é".repeat(CHAT_MAX_CHARS);
+        assert_eq!(cap_incoming(&max), max);
+        let long = format!("{max}abc");
+        let cut = cap_incoming(&long);
+        assert_eq!(cut, format!("{max}…"));
+        assert_eq!(cut.chars().count(), CHAT_MAX_CHARS + 1);
     }
 
     #[test]
