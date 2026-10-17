@@ -3,6 +3,9 @@
   import { onMount } from 'svelte'
   import { DUR, EASE, animate } from '../design/motion.ts'
   import type { ConnEvent } from './connecting/connecting.ts'
+  import SessionPill from './session/SessionPill.svelte'
+  import { createAltTap, isDeadZone, nearTopEdge, shouldForwardKey } from './session/sessionPill.ts'
+  import Button from './ui/Button.svelte'
   import {
     EVENTS,
     FRAME_HEADER_LEN,
@@ -19,8 +22,12 @@
     parseFrameHeader,
     sendKey,
     sendMouse,
-    switchDisplay,
     accumulateWheel,
+    currentDisplay,
+    displayList,
+    mergeQuality,
+    quality,
+    resetSessionState,
     type DisplayRect,
     type Modifiers,
     type MsgBox,
@@ -40,11 +47,12 @@
 
   let canvas: HTMLCanvasElement
   let ctx: CanvasRenderingContext2D | null = null
-  let displays = $state<DisplayRect[]>([])
-  let current = $state(0)
+  // Plain (non-reactive) copies of the shared stores, read on every pointer event.
+  let displays: DisplayRect[] = []
+  let current = 0
   let connected = $state(false)
   let msg = $state<MsgBox | null>(null)
-  let quality = $state<Quality>({ fps: null, delay: null, speed: null })
+  let pill = $state<SessionPill>()
   let retryPassword = $state('')
   // Hidden (clipped to nothing) until the first frame; until then the connecting screen
   // shows the progress and any message.
@@ -57,10 +65,13 @@
     msg !== null && (msg.kind === 'input-password' || msg.kind === 're-input-password'),
   )
 
+  // Dev-only frame-time probe around putImageData (docs/design/latencia-etapa3.md).
+  const probe = import.meta.env.DEV ? { n: 0, sum: 0, max: 0 } : null
+
   function onFrame(buf: ArrayBuffer) {
     const h = parseFrameHeader(buf)
     if (h && ctx) {
-      current = h.display
+      if (current !== h.display) currentDisplay.set((current = h.display))
       if (canvas.width !== h.width || canvas.height !== h.height) {
         canvas.width = h.width
         canvas.height = h.height
@@ -85,7 +96,20 @@
         }
         img = cached
       }
-      ctx.putImageData(img, 0, 0)
+      if (probe) {
+        const t0 = performance.now()
+        ctx.putImageData(img, 0, 0)
+        const dt = performance.now() - t0
+        probe.n++
+        probe.sum += dt
+        probe.max = Math.max(probe.max, dt)
+        if (probe.n === 120) {
+          console.debug(`[frame] putImageData avg ${(probe.sum / 120).toFixed(2)} ms, max ${probe.max.toFixed(2)} ms`)
+          probe.n = probe.sum = probe.max = 0
+        }
+      } else {
+        ctx.putImageData(img, 0, 0)
+      }
       if (!revealed) reveal()
       if (!connected) {
         connected = true
@@ -136,6 +160,23 @@
   const wheelAcc = { x: 0, y: 0 }
   const NO_MODS: Modifiers = { alt: false, ctrl: false, shift: false, command: false }
 
+  /** Pointer over the visible pill: this event must not reach the remote (Review Focus 5). */
+  function inDeadZone(e: MouseEvent): boolean {
+    return isDeadZone(e.clientX, e.clientY, pill?.hitRect() ?? null)
+  }
+
+  /** Release what the peer believes is pressed (only buttons it was told about). */
+  function releaseButtons() {
+    for (const b of heldButtons) {
+      sendMouse(mouseMask(b, MouseEvt.up), lastPos.x, lastPos.y, NO_MODS)
+    }
+    heldButtons.clear()
+  }
+  function releaseKeys() {
+    for (const name of heldKeys) sendKey(name, false, false, NO_MODS)
+    heldKeys.clear()
+  }
+
   function sendButton(b: number, down: boolean, e: MouseEvent) {
     if (b === MouseButton.none) return
     if (down) heldButtons.add(b)
@@ -145,6 +186,15 @@
   }
 
   function onPointerMove(e: PointerEvent) {
+    if (!revealed) return
+    if (inDeadZone(e)) {
+      // Only reachable with pointer capture (a drag that started on the screen): let go of it
+      // there, so nothing over the pill is a drag on the remote.
+      releaseButtons()
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
+      return
+    }
+    if (nearTopEdge(e.clientY)) pill?.peek()
     // A second button pressed/released while another is held arrives as a pointermove.
     if (e.button >= 0) {
       const bit = e.button === 1 ? 4 : e.button === 2 ? 2 : 1 << e.button
@@ -157,6 +207,8 @@
   }
   function onPointerDown(e: PointerEvent) {
     e.preventDefault()
+    altTap.cancel()
+    if (!revealed || inDeadZone(e)) return
     canvas.focus()
     // Capture so the matching pointerup arrives even if released outside the window.
     canvas.setPointerCapture(e.pointerId)
@@ -164,6 +216,7 @@
   }
   function onPointerUp(e: PointerEvent) {
     e.preventDefault()
+    if (!revealed || inDeadZone(e)) return
     sendButton(domButton(e.button), false, e)
     if (e.buttons === 0 && canvas.hasPointerCapture(e.pointerId)) {
       canvas.releasePointerCapture(e.pointerId)
@@ -171,30 +224,44 @@
   }
   function onWheel(e: WheelEvent) {
     e.preventDefault()
+    if (!revealed || inDeadZone(e)) return
     const s = accumulateWheel(wheelAcc, e.deltaX, e.deltaY, e.deltaMode)
     const mask = mouseMask(MouseButton.none, MouseEvt.wheel)
     for (let i = 0; i < Math.abs(s.x); i++) sendMouse(mask, Math.sign(s.x), 0, mods(e))
     for (let i = 0; i < Math.abs(s.y); i++) sendMouse(mask, 0, Math.sign(s.y), mods(e))
   }
 
+  const altTap = createAltTap()
+
   function onKey(e: KeyboardEvent, down: boolean) {
-    if (!connected || e.target instanceof HTMLInputElement) return
+    if (down) altTap.down(e.key, e.repeat)
+    else if (altTap.up(e.key) && revealed) queueMicrotask(() => pill?.summon())
     const name = keyName(e.code, e.key)
     if (!name) return
+    if (!down) {
+      // A release always goes out for a key the peer holds, wherever focus went meanwhile.
+      if (!heldKeys.delete(name)) return
+      e.preventDefault()
+      sendKey(name, false, false, mods(e))
+      return
+    }
+    const target = e.target as Node | null
+    const ok = shouldForwardKey({
+      revealed,
+      canvasFocused: target === canvas || target === document.body,
+      pillFocused: !!pill?.owns(target),
+    })
+    if (!ok) return
     e.preventDefault()
-    if (down) heldKeys.add(name)
-    else heldKeys.delete(name)
-    sendKey(name, down, false, mods(e))
+    heldKeys.add(name)
+    sendKey(name, true, false, mods(e))
   }
 
   /** Window lost focus: send "up" for everything the peer still holds. */
   function releaseAll() {
-    for (const name of heldKeys) sendKey(name, false, false, NO_MODS)
-    heldKeys.clear()
-    for (const b of heldButtons) {
-      sendMouse(mouseMask(b, MouseEvt.up), lastPos.x, lastPos.y, NO_MODS)
-    }
-    heldButtons.clear()
+    releaseKeys()
+    releaseButtons()
+    altTap.cancel()
     wheelAcc.x = 0
     wheelAcc.y = 0
   }
@@ -213,10 +280,12 @@
 
   onMount(() => {
     ctx = canvas.getContext('2d')
+    resetSessionState()
     let lastMsg: MsgBox | null = null
     const unlisten: Promise<UnlistenFn>[] = [
       listen<DisplayRect[]>(EVENTS.displays, (e) => {
         displays = e.payload
+        displayList.set(e.payload)
         if (!revealed) onevent?.({ type: 'displays' })
       }),
       listen(EVENTS.connected, () => {
@@ -230,12 +299,7 @@
         else onevent?.({ type: 'msgbox', box: e.payload })
       }),
       listen<Quality>(EVENTS.quality, (e) => {
-        const q = e.payload
-        quality = {
-          fps: q.fps ?? quality.fps,
-          delay: q.delay ?? quality.delay,
-          speed: q.speed ?? quality.speed,
-        }
+        quality.update((prev) => mergeQuality(prev, e.payload))
       }),
       listen(EVENTS.closed, () => onclosed(lastMsg)),
     ]
@@ -274,29 +338,27 @@
     oncontextmenu={(e) => e.preventDefault()}
   ></canvas>
 
-  <div class="bar">
-    <span>{peerId}</span>
-    {#if displays.length > 1}
-      {#each displays as _, i (i)}
-        <button class:active={i === current} onclick={() => switchDisplay(i)}>Tela {i + 1}</button>
-      {/each}
-    {/if}
-    {#if quality.fps !== null}<span>{quality.fps} fps</span>{/if}
-    {#if quality.delay !== null}<span>{quality.delay} ms</span>{/if}
-    <button onclick={disconnect}>Desconectar</button>
-  </div>
+  {#if revealed}
+    <SessionPill
+      bind:this={pill}
+      {peerId}
+      onend={disconnect}
+      onreturn={() => canvas.focus()}
+      onenter={releaseKeys}
+    />
+  {/if}
 
   {#if revealed && msg}
     <div class="overlay">
-      <p><strong>{msg.title}</strong></p>
-      <p>{msg.text}</p>
+      <p class="t-lead">{msg.title}</p>
+      {#if msg.text}<p class="t-body muted">{msg.text}</p>{/if}
       {#if needsPassword}
         <form onsubmit={submitPassword}>
-          <input type="password" placeholder="Senha" bind:value={retryPassword} />
-          <button type="submit">Entrar</button>
+          <input type="password" placeholder="Senha" aria-label="Senha" bind:value={retryPassword} />
+          <Button variant="primary" type="submit">Entrar</Button>
         </form>
       {:else if connected}
-        <button onclick={() => (msg = null)}>OK</button>
+        <Button onclick={() => (msg = null)}>OK</Button>
       {/if}
     </div>
   {/if}
@@ -321,33 +383,45 @@
     cursor: default;
     touch-action: none;
   }
-  .bar {
-    position: absolute;
-    top: 0;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    padding: 0.25rem 0.75rem;
-    background: rgba(0, 0, 0, 0.6);
-    color: #eee;
-    font-size: 0.85rem;
-    border-radius: 0 0 6px 6px;
-  }
-  .bar button.active {
-    font-weight: bold;
-  }
   .overlay {
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    background: #fff;
-    color: #111;
-    padding: 1rem 1.5rem;
-    border-radius: 8px;
-    max-width: 24rem;
+    z-index: 3;
+    display: grid;
+    gap: var(--space-3);
+    justify-items: center;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--line-strong);
+    box-shadow: var(--shadow-float);
+    padding: var(--space-5) var(--space-6);
+    border-radius: var(--radius-lg);
+    max-width: 26rem;
     text-align: center;
+  }
+  .overlay p {
+    margin: 0;
+  }
+  .muted {
+    color: var(--text-muted);
+  }
+  .overlay form {
+    display: flex;
+    gap: var(--space-2);
+  }
+  .overlay input {
+    min-height: 44px;
+    padding: 0 var(--space-4);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-pill);
+    background: var(--surface-2);
+    color: var(--text);
+    font: inherit;
+  }
+  .overlay input:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
 </style>

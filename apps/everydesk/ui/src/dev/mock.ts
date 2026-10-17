@@ -51,6 +51,7 @@ if (location.hash === '#claro') {
 // Moment 2 (connecting). /#busca: connect to "Mãe" and stay searching. /#pedindo: the host
 // shows its accept card. /#erro: the server never answers (with the engine's clock hint,
 // which the screen must not show). /#revela: a first frame arrives and the session opens.
+// /#sessao (moment 3): straight into a session with two monitors and quality readings.
 const flow = location.hash.slice(1)
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
@@ -61,6 +62,14 @@ function connecting(frames: Channel<ArrayBuffer>) {
       box('error', 'Connection Error', 'Failed to connect via rendezvous server. Se o problema persistir, confira o relógio do computador.')
       emit('session:closed')
     })
+  if (flow === 'sessao') {
+    // Moment 3: a session with two monitors and live quality readings.
+    at(300, () => emit('session:displays', [{ x: 0, y: 0, w: 1280, h: 800 }, { x: 1280, y: 0, w: 1280, h: 800 }]))
+    at(400, () => emit('session:connected'))
+    at(600, () => frames.onmessage(fakeFrame(1280, 800)))
+    let n = 0
+    setInterval(() => emit('session:quality', { fps: 30 - (n % 3), delay: 32 + (n++ % 5), speed: null }), 1000)
+  }
   if (flow === 'revela') {
     at(2200, () => emit('session:displays', [{ x: 0, y: 0, w: 1280, h: 800 }]))
     at(2400, () => emit('session:connected'))
@@ -87,7 +96,7 @@ function fakeFrame(w: number, h: number): ArrayBuffer {
   return buf
 }
 
-if (['busca', 'pedindo', 'erro', 'revela'].includes(flow))
+if (['busca', 'pedindo', 'erro', 'revela', 'sessao'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return

@@ -3,6 +3,7 @@
 // The pure helpers carry no DOM/Tauri dependency so `node --test` can exercise them.
 
 import { Channel, invoke } from '@tauri-apps/api/core'
+import { writable } from 'svelte/store'
 
 export interface DisplayRect {
   x: number
@@ -21,6 +22,28 @@ export interface Quality {
   fps: number | null
   delay: number | null
   speed: string | null
+}
+
+export const NO_QUALITY: Quality = { fps: null, delay: null, speed: null }
+
+/** A `session:quality` payload may carry only some fields: keep the last known value of the rest. */
+export function mergeQuality(prev: Quality, q: Partial<Quality>): Quality {
+  return { fps: q.fps ?? prev.fps, delay: q.delay ?? prev.delay, speed: q.speed ?? prev.speed }
+}
+
+// ---- live session state (fed by RemoteCanvas, read by the pill) ---------------------
+
+/** Latest `session:quality` reading (fps, delay in ms, speed). */
+export const quality = writable<Quality>(NO_QUALITY)
+/** The peer's displays (`session:displays`). */
+export const displayList = writable<DisplayRect[]>([])
+/** Index of the display the frames currently come from. */
+export const currentDisplay = writable(0)
+
+export function resetSessionState() {
+  quality.set(NO_QUALITY)
+  displayList.set([])
+  currentDisplay.set(0)
 }
 
 export interface Modifiers {
