@@ -207,10 +207,228 @@ async fn click_approve_deadline(authorized: bool, prompted: Option<Instant>) {
 
 /// Whether the host handles a `FileAction` (everydesk). A file-transfer login keeps the stock
 /// behaviour (always handled). A screen session (`DEFAULT_CONN`) handles it only while it is
-/// authorized and its `file` permission is on, so `SwitchPermission("file", false)` stops it.
+/// authorized and file access is on (`Connection::ed_files_enabled`), so
+/// `SwitchPermission("file", false)` or the controller's view-only stops it.
 #[cfg(feature = "everydesk")]
 fn file_action_allowed(conn_type_is_ft: bool, authorized: bool, ft_enabled: bool) -> bool {
     conn_type_is_ft || (authorized && ft_enabled)
+}
+
+/// EveryDesk screen-session file scope (Stage 4: upload only). A screen session (`DEFAULT_CONN`)
+/// may only drop files into the host's home, `home/Desktop` or `home/Downloads`, list exactly
+/// those three folders (the controller's destination probes), cancel, and answer an overwrite
+/// prompt. Everything else is refused with `ED_REFUSED`. File-transfer logins never come here.
+#[cfg(feature = "everydesk")]
+mod ed_files {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    pub const REFUSED: &str = "não permitido nesta sessão";
+    const ROOTS: [&str; 2] = ["Desktop", "Downloads"];
+
+    /// The path components of `p`; `\` is a separator only on a Windows host.
+    fn split(p: &str, windows: bool) -> Vec<&str> {
+        p.split(|c| c == '/' || (windows && c == '\\'))
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
+    /// Absolute on the host: `/...`, or `X:\...` on Windows (UNC `\\server` and `\\?\` are not).
+    fn is_absolute(p: &str, windows: bool) -> bool {
+        if windows {
+            let b = p.as_bytes();
+            b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+        } else {
+            p.starts_with('/')
+        }
+    }
+
+    /// One peer-supplied name component below the home folder.
+    fn component_ok(c: &str, windows: bool) -> bool {
+        if c == "." || c == ".." || c.contains('\0') {
+            return false;
+        }
+        if windows
+            && (c.chars().any(|ch| ch.is_control() || "\\/:*?\"<>|".contains(ch))
+                || c.ends_with(['.', ' ']))
+        {
+            return false;
+        }
+        true
+    }
+
+    fn same(a: &str, b: &str) -> bool {
+        a.to_lowercase() == b.to_lowercase()
+    }
+
+    /// The components of `path` below `home`, each checked; None when `path` is not an
+    /// absolute path inside `home` or any component is unsafe (`..`, `.`, Windows-invalid).
+    fn below_home<'a>(home: &str, path: &'a str, windows: bool) -> Option<Vec<&'a str>> {
+        if !is_absolute(home, windows) || !is_absolute(path, windows) {
+            return None;
+        }
+        let h = split(home, windows);
+        let p = split(path, windows);
+        if p.len() < h.len() || !h.iter().zip(p.iter()).all(|(a, b)| same(a, b)) {
+            return None;
+        }
+        let rest = p[h.len()..].to_vec();
+        rest.iter().all(|c| component_ok(c, windows)).then_some(rest)
+    }
+
+    /// `ReadDir` on a screen session: the home listing (`""`), home, `home/Desktop`,
+    /// `home/Downloads`.
+    pub fn read_dir_allowed(home: &str, path: &str, windows: bool) -> bool {
+        if path.is_empty() {
+            return true;
+        }
+        match below_home(home, path, windows) {
+            Some(rest) => {
+                rest.is_empty() || (rest.len() == 1 && ROOTS.iter().any(|r| same(r, rest[0])))
+            }
+            None => false,
+        }
+    }
+
+    /// Where an upload lands: the receiving folder (`home`, `home/Desktop` or `home/Downloads`)
+    /// and the top-level item created in it, as host paths.
+    #[derive(Debug, PartialEq)]
+    pub struct UploadTarget {
+        pub root: String,
+        pub top: String,
+        pub at_home: bool,
+    }
+
+    /// Lexical confinement of an upload (or a `Create` of one of its folders): `path` plus each
+    /// relative `names` entry (folder uploads) must stay inside one of the three receiving
+    /// folders, with no `..`/`.`, absolute or drive/UNC names, Windows-invalid characters, and
+    /// no hidden (`.name`) item at the top level (`~/.ssh`, `~/.zshrc`).
+    pub fn upload_target(
+        home: &str,
+        path: &str,
+        names: &[&str],
+        windows: bool,
+    ) -> Option<UploadTarget> {
+        let rest = below_home(home, path, windows)?;
+        for name in names {
+            if name.is_empty() {
+                continue;
+            }
+            if is_absolute(name, windows)
+                || name.starts_with(['/', '\\'])
+                || (name.len() >= 2 && name.as_bytes()[1] == b':')
+                || !split(name, windows).iter().all(|c| component_ok(c, windows))
+                || (!windows && name.contains('\\'))
+            {
+                return None;
+            }
+        }
+        let sep = if windows { '\\' } else { '/' };
+        let home_t = home.trim_end_matches(['/', '\\']);
+        let (root, top_i, at_home) = match rest.first() {
+            Some(first) if rest.len() >= 2 && ROOTS.iter().any(|r| same(r, first)) => {
+                (format!("{home_t}{sep}{first}"), 1, false)
+            }
+            Some(_) => (home_t.to_owned(), 0, true),
+            None => return None,
+        };
+        let top = rest[top_i];
+        if top.starts_with('.') {
+            return None;
+        }
+        Some(UploadTarget { top: format!("{root}{sep}{top}"), root, at_home })
+    }
+
+    /// What a screen session does with a `FileAction`: Ok = handle it, Err((job id, file num))
+    /// = refuse it with an error reply.
+    pub fn verdict(fa: &FileAction, home: &str, windows: bool) -> Result<(), (i32, i32)> {
+        use file_action::Union as U;
+        match &fa.union {
+            None | Some(U::Cancel(_)) | Some(U::SendConfirm(_)) => Ok(()),
+            Some(U::ReadDir(rd)) => {
+                read_dir_allowed(home, &rd.path, windows).then_some(()).ok_or((0, -1))
+            }
+            Some(U::Receive(r)) => {
+                let names: Vec<&str> = r.files.iter().map(|f| f.name.as_str()).collect();
+                upload_target(home, &r.path, &names, windows)
+                    .map(|_| ())
+                    .ok_or((r.id, r.file_num))
+            }
+            Some(U::Create(c)) => {
+                upload_target(home, &c.path, &[], windows).map(|_| ()).ok_or((c.id, -1))
+            }
+            Some(U::Send(s)) if is_printer(s) => Ok(()),
+            Some(U::Send(s)) => Err((s.id, s.file_num)),
+            Some(U::RemoveDir(d)) => Err((d.id, -1)),
+            Some(U::RemoveFile(f)) => Err((f.id, f.file_num)),
+            Some(U::Rename(r)) => Err((r.id, -1)),
+            Some(U::AllFiles(f)) => Err((f.id, -1)),
+            Some(U::ReadEmptyDirs(_)) => Err((0, -1)),
+            #[allow(unreachable_patterns)]
+            Some(_) => Err((0, -1)),
+        }
+    }
+
+    /// Printer jobs read the host's in-memory print data, never a host file (stock behaviour on
+    /// every connection type).
+    fn is_printer(s: &FileTransferSendRequest) -> bool {
+        JobType::from_proto(s.file_type) == JobType::Printer
+    }
+
+    /// The deepest existing ancestor of `path`, canonicalized, with the missing tail re-added
+    /// (as `common::is_peer_path_allowed` does), so symlinks cannot leave the receiving folder.
+    fn resolve(path: &Path) -> Option<PathBuf> {
+        let mut tail: Vec<std::ffi::OsString> = Vec::new();
+        let mut base = path.to_path_buf();
+        loop {
+            if let Ok(mut resolved) = base.canonicalize() {
+                while let Some(c) = tail.pop() {
+                    resolved.push(c);
+                }
+                return Some(resolved);
+            }
+            tail.push(base.file_name()?.to_os_string());
+            if !base.pop() {
+                return None;
+            }
+        }
+    }
+
+    /// The filesystem half of the confinement: `path` resolves inside the receiving folder,
+    /// and at the home root the upload never writes into an existing folder (`Library`,
+    /// `AppData`...).
+    pub fn upload_fs_ok(t: &UploadTarget, path: &str) -> bool {
+        let Ok(root) = Path::new(&t.root).canonicalize() else {
+            return false;
+        };
+        if t.at_home && Path::new(&t.top).is_dir() {
+            return false;
+        }
+        resolve(Path::new(path)).map_or(false, |p| p.starts_with(&root) && p != root)
+    }
+
+    /// The host's home folder, as the CM lists it for `ReadDir("")`.
+    pub fn host_home() -> String {
+        #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+        if crate::platform::is_root() {
+            if let Some(h) = crate::platform::get_active_user_home() {
+                return h.to_string_lossy().into_owned();
+            }
+        }
+        hbb_common::config::Config::get_home().to_string_lossy().into_owned()
+    }
+
+    /// Ids of every file job of the connection to cancel when its file permission goes away:
+    /// uploads it accepted plus downloads it serves; the upload set is emptied.
+    pub fn revoke_ids(
+        uploads: &mut std::collections::HashSet<i32>,
+        reads: impl IntoIterator<Item = i32>,
+    ) -> Vec<i32> {
+        let mut ids: Vec<i32> = uploads.drain().chain(reads).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
 }
 
 lazy_static::lazy_static! {
@@ -459,6 +677,13 @@ pub struct Connection {
     // EveryDesk: the periodic reconfirmation of a `Policy::Reconfirm` contact.
     #[cfg(feature = "everydesk")]
     reconfirm: Option<crate::everydesk::reconfirm::ReconfirmState>,
+    // EveryDesk: ids of the uploads this screen session accepted; cancelled when the file
+    // permission or the controller's view-only takes file access away.
+    #[cfg(feature = "everydesk")]
+    ed_upload_ids: HashSet<i32>,
+    // EveryDesk: the controller last sent `enable_file_transfer = No` (its view-only).
+    #[cfg(feature = "everydesk")]
+    ed_file_transfer_off: bool,
     peer_argb: u32,
     session_last_recv_time: Option<Arc<Mutex<Instant>>>,
     chat_unanswered: bool,
@@ -674,6 +899,10 @@ impl Connection {
             pair_offered: None,
             #[cfg(feature = "everydesk")]
             reconfirm: None,
+            #[cfg(feature = "everydesk")]
+            ed_upload_ids: HashSet::new(),
+            #[cfg(feature = "everydesk")]
+            ed_file_transfer_off: false,
             peer_argb: 0u32,
             session_last_recv_time: None,
             chat_unanswered: false,
@@ -957,6 +1186,10 @@ impl Connection {
                             } else if &name == "file" {
                                 conn.file = enabled;
                                 conn.send_permission(Permission::File, enabled).await;
+                                #[cfg(feature = "everydesk")]
+                                if !enabled {
+                                    conn.ed_cancel_file_jobs().await;
+                                }
                                 #[cfg(feature = "unix-file-copy-paste")]
                                 if !enabled {
                                     conn.try_empty_file_clipboard();
@@ -2327,7 +2560,7 @@ impl Connection {
             // Screen session with file permission: send the host's home listing once, as a
             // file-transfer login does, so the controller learns the remote home path.
             #[cfg(feature = "everydesk")]
-            if file_action_allowed(false, self.authorized && self.is_remote(), self.file) {
+            if file_action_allowed(false, self.authorized && self.is_remote(), self.ed_files_enabled()) {
                 if !wait_session_id_confirm {
                     self.read_dir("", false);
                 } else {
@@ -3657,11 +3890,15 @@ impl Connection {
                     let mut handle_fa = file_action_allowed(
                         self.file_transfer.is_some(),
                         self.authorized && self.is_remote(),
-                        self.file,
+                        self.ed_files_enabled(),
                     );
+                    // Screen session: upload-only subset, confined to home/Desktop/Downloads.
                     #[cfg(feature = "everydesk")]
                     if handle_fa && self.file_transfer.is_none() {
-                        log::info!("everydesk: file action on screen session");
+                        if let Err((id, file_num)) = self.ed_screen_file_check(&fa) {
+                            self.send(fs::new_error(id, ed_files::REFUSED, file_num)).await;
+                            return true;
+                        }
                     }
                     if !handle_fa {
                         if let Some(file_action::Union::Send(s)) = fa.union.as_ref() {
@@ -3906,6 +4143,10 @@ impl Connection {
                                     total_size: r.total_size,
                                     conn_id: self.inner.id(),
                                 });
+                                #[cfg(feature = "everydesk")]
+                                if self.file_transfer.is_none() {
+                                    self.ed_upload_ids.insert(r.id);
+                                }
                                 self.post_file_audit(
                                     FileAuditType::RemoteReceive,
                                     &r.path,
@@ -3947,6 +4188,8 @@ impl Connection {
                                 )));
                             }
                             Some(file_action::Union::Cancel(c)) => {
+                                #[cfg(feature = "everydesk")]
+                                self.ed_upload_ids.remove(&c.id);
                                 self.send_fs(ipc::FS::CancelWrite { id: c.id });
                                 let _ = self.cm_read_job_ids.remove(&c.id);
                                 self.send_fs(ipc::FS::CancelRead {
@@ -4008,6 +4251,8 @@ impl Connection {
                         });
                     }
                     Some(file_response::Union::Done(d)) => {
+                        #[cfg(feature = "everydesk")]
+                        self.ed_upload_ids.remove(&d.id);
                         self.send_fs(ipc::FS::WriteDone {
                             id: d.id,
                             file_num: d.file_num,
@@ -4022,6 +4267,8 @@ impl Connection {
                         is_resume: d.is_resume,
                     }),
                     Some(file_response::Union::Error(e)) => {
+                        #[cfg(feature = "everydesk")]
+                        self.ed_upload_ids.remove(&e.id);
                         self.send_fs(ipc::FS::WriteError {
                             id: e.id,
                             file_num: e.file_num,
@@ -5080,6 +5327,14 @@ impl Connection {
 
     async fn update_options(&mut self, o: &OptionMessage) {
         log::info!("Option update: {:?}", o);
+        #[cfg(feature = "everydesk")]
+        let ed_files_were_enabled = self.ed_files_enabled();
+        #[cfg(feature = "everydesk")]
+        if let Ok(q) = o.enable_file_transfer.enum_value() {
+            if q != BoolOption::NotSet {
+                self.ed_file_transfer_off = q == BoolOption::No;
+            }
+        }
         if let Ok(q) = o.image_quality.enum_value() {
             let image_quality;
             if let ImageQuality::NotSet = q {
@@ -5318,6 +5573,11 @@ impl Connection {
                     }
                 }
             }
+        }
+        // View-only (keyboard and file transfer off) mid-upload: stop the running jobs too.
+        #[cfg(feature = "everydesk")]
+        if ed_files_were_enabled && !self.ed_files_enabled() {
+            self.ed_cancel_file_jobs().await;
         }
     }
 
@@ -5998,6 +6258,79 @@ impl Connection {
             dir,
             include_hidden,
         });
+    }
+
+    /// Screen-session file access (everydesk): the `file` permission, and not the controller's
+    /// view-only (which disables the keyboard and sends `enable_file_transfer = No`).
+    /// `self.enable_file_transfer` itself is not used: it defaults to off, is only parsed with
+    /// clipboard file copy-paste, and a view-only login leaves it unset.
+    #[cfg(feature = "everydesk")]
+    fn ed_files_enabled(&self) -> bool {
+        self.file && !self.disable_keyboard && !self.ed_file_transfer_off
+    }
+
+    /// The Stage 4 subset for a screen session; Err((job id, file num)) to refuse.
+    #[cfg(feature = "everydesk")]
+    fn ed_screen_file_check(&self, fa: &FileAction) -> Result<(), (i32, i32)> {
+        let home = ed_files::host_home();
+        let windows = cfg!(windows);
+        let mut res = ed_files::verdict(fa, &home, windows);
+        if res.is_ok() {
+            // Filesystem half of the confinement (symlinks, existing folders at the home root).
+            let target = match &fa.union {
+                Some(file_action::Union::Receive(r)) => Some((r.path.as_str(), r.id, r.file_num)),
+                Some(file_action::Union::Create(c)) => Some((c.path.as_str(), c.id, -1)),
+                _ => None,
+            };
+            if let Some((path, id, file_num)) = target {
+                let ok = ed_files::upload_target(&home, path, &[], windows)
+                    .map_or(false, |t| ed_files::upload_fs_ok(&t, path));
+                if !ok {
+                    res = Err((id, file_num));
+                }
+            }
+        }
+        match &res {
+            Ok(()) => log::debug!("everydesk: file action on screen session"),
+            Err(_) => log::debug!("everydesk: file action refused on screen session"),
+        }
+        res
+    }
+
+    /// File permission (or view-only) taken away from a screen session: cancel its running
+    /// uploads (the CM drops the partial file and logs the cancel) and any read job, and tell
+    /// the controller each one ended. File-transfer logins keep the stock behaviour.
+    #[cfg(feature = "everydesk")]
+    async fn ed_cancel_file_jobs(&mut self) {
+        if self.file_transfer.is_some() {
+            return;
+        }
+        let reads: Vec<i32> = self
+            .read_jobs
+            .iter()
+            .map(|j| j.id())
+            .chain(self.cm_read_job_ids.iter().copied())
+            .collect();
+        let ids = ed_files::revoke_ids(&mut self.ed_upload_ids, reads);
+        if !ids.is_empty() {
+            log::debug!("everydesk: file access revoked, cancelling {} job(s)", ids.len());
+        }
+        for id in ids {
+            self.send_fs(ipc::FS::CancelWrite { id });
+            if self.cm_read_job_ids.remove(&id) {
+                self.send_fs(ipc::FS::CancelRead {
+                    id,
+                    conn_id: self.inner.id(),
+                });
+            }
+            if let Some(job) = fs::remove_job(id, &mut self.read_jobs) {
+                self.send_to_cm(ipc::Data::FileTransferLog((
+                    "transfer".to_string(),
+                    fs::serialize_transfer_job(&job, false, true, ""),
+                )));
+            }
+            self.send(fs::new_error(id, ed_files::REFUSED, -1)).await;
+        }
     }
 
     fn read_dir(&mut self, dir: &str, include_hidden: bool) {
@@ -7637,6 +7970,146 @@ mod test {
         assert!(!file_action_allowed(false, true, false));
         assert!(!file_action_allowed(false, false, true));
         assert!(!file_action_allowed(false, false, false));
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn screen_session_allows_only_upload_subset() {
+        use super::ed_files::verdict;
+        let home = "/Users/host";
+        let fa = |u: file_action::Union| FileAction {
+            union: Some(u),
+            ..Default::default()
+        };
+        let rd = |p: &str| {
+            fa(file_action::Union::ReadDir(ReadDir {
+                path: p.into(),
+                ..Default::default()
+            }))
+        };
+        let send = |t: file_transfer_send_request::FileType| {
+            fa(file_action::Union::Send(FileTransferSendRequest {
+                id: 7,
+                path: "/Users/host/secret.txt".into(),
+                file_type: t.into(),
+                ..Default::default()
+            }))
+        };
+        let receive = |p: &str| {
+            fa(file_action::Union::Receive(FileTransferReceiveRequest {
+                id: 8,
+                path: p.into(),
+                ..Default::default()
+            }))
+        };
+        let create = |p: &str| {
+            fa(file_action::Union::Create(FileDirCreate {
+                id: 9,
+                path: p.into(),
+                ..Default::default()
+            }))
+        };
+        let table: Vec<(&str, FileAction, bool)> = vec![
+            ("receive desktop", receive("/Users/host/Desktop/a.txt"), true),
+            ("receive outside", receive("/etc/x"), false),
+            ("cancel", fa(file_action::Union::Cancel(FileTransferCancel { id: 1, ..Default::default() })), true),
+            ("send confirm", fa(file_action::Union::SendConfirm(FileTransferSendConfirmRequest { id: 1, ..Default::default() })), true),
+            ("read home listing", rd(""), true),
+            ("read home", rd("/Users/host"), true),
+            ("read desktop", rd("/Users/host/Desktop"), true),
+            ("read downloads", rd("/Users/host/Downloads/"), true),
+            ("read documents", rd("/Users/host/Documents"), false),
+            ("read etc", rd("/etc"), false),
+            ("read desktop child", rd("/Users/host/Desktop/x"), false),
+            ("create in desktop", create("/Users/host/Desktop/folder/sub"), true),
+            ("create outside", create("/tmp/x"), false),
+            ("send generic", send(file_transfer_send_request::FileType::Generic), false),
+            ("send printer", send(file_transfer_send_request::FileType::Printer), true),
+            ("remove file", fa(file_action::Union::RemoveFile(FileRemoveFile { id: 2, path: "/Users/host/Desktop/a".into(), ..Default::default() })), false),
+            ("remove dir", fa(file_action::Union::RemoveDir(FileRemoveDir { id: 3, path: "/Users/host/Desktop".into(), ..Default::default() })), false),
+            ("rename", fa(file_action::Union::Rename(FileRename { id: 4, path: "/Users/host/Desktop/a".into(), new_name: "b".into(), ..Default::default() })), false),
+            ("all files", fa(file_action::Union::AllFiles(ReadAllFiles { id: 5, path: "/Users/host/Desktop".into(), ..Default::default() })), false),
+            ("read empty dirs", fa(file_action::Union::ReadEmptyDirs(ReadEmptyDirs { path: "/Users/host/Desktop".into(), ..Default::default() })), false),
+        ];
+        for (name, action, allowed) in table {
+            assert_eq!(verdict(&action, home, false).is_ok(), allowed, "{name}");
+        }
+        // A refusal answers with the job's id so the controller's job ends.
+        assert_eq!(verdict(&send(file_transfer_send_request::FileType::Generic), home, false), Err((7, 0)));
+        assert_eq!(verdict(&rd("/etc"), home, false), Err((0, -1)));
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn upload_path_confined() {
+        use super::ed_files::upload_target;
+        let ok = |h: &str, p: &str, n: &[&str], w: bool| upload_target(h, p, n, w).is_some();
+        // ok
+        assert!(ok("/Users/host", "/Users/host/Desktop/a.txt", &[], false));
+        assert!(ok("/Users/host", "/Users/host/Downloads/x", &["y.txt"], false));
+        assert!(ok("/Users/host", "/Users/host/Downloads/x", &["sub/y.txt"], false));
+        assert!(ok("/Users/host", "/Users/host/a.txt", &[], false));
+        assert!(ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\a.txt", &[], true));
+        assert!(ok("C:\\Users\\bob", "c:\\users\\BOB\\desktop\\a.txt", &[], true));
+        let t = upload_target("/Users/host", "/Users/host/Desktop/x/y.txt", &[], false).unwrap();
+        assert_eq!(t.root, "/Users/host/Desktop");
+        assert_eq!(t.top, "/Users/host/Desktop/x");
+        assert!(!t.at_home);
+        assert!(upload_target("/Users/host", "/Users/host/n.txt", &[], false).unwrap().at_home);
+        // refused
+        assert!(!ok("/Users/host", "/Users/host/../etc/passwd", &[], false));
+        assert!(!ok("/Users/host", "/etc/x", &[], false));
+        assert!(!ok("/Users/host", "Users/host/Desktop/a", &[], false));
+        assert!(!ok("/Users/host", "/Users/host", &[], false));
+        assert!(!ok("/Users/host", "/Users/host/.ssh/authorized_keys", &[], false));
+        assert!(!ok("/Users/host", "/Users/host/.zshrc", &[], false));
+        assert!(!ok("/Users/host", "/Users/host/Desktop/.hidden", &[], false));
+        assert!(!ok("/Users/host", "/Users/host/Desktop/./a", &[], false));
+        assert!(!ok("/Users/host", "/Users/host/Desktop/x", &["../../../etc/passwd"], false));
+        assert!(!ok("/Users/host", "/Users/host/Desktop/x", &["/etc/passwd"], false));
+        assert!(!ok("/Users/host", "/Users/host/Desktop/x", &["a\\..\\..\\b"], false));
+        assert!(!ok("C:\\Users\\bob", "C:\\Windows\\x.dll", &[], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\..\\..\\x", &[], true));
+        assert!(!ok("C:\\Users\\bob", "\\\\server\\share\\x", &[], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\a:stream", &[], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\a?.txt", &[], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\x", &["D:\\evil"], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\x", &["a\\..\\..\\b"], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\x.", &[], true));
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn upload_fs_confined() {
+        use super::ed_files::{upload_fs_ok, upload_target};
+        let base = std::env::temp_dir().join(format!("ed-up-{}", std::process::id()));
+        let home = base.join("home");
+        std::fs::create_dir_all(home.join("Desktop")).unwrap();
+        std::fs::create_dir_all(home.join("Library")).unwrap();
+        let h = home.to_string_lossy().into_owned();
+        let check = |p: &str| {
+            let p = format!("{h}/{p}");
+            upload_target(&h, &p, &[], false).map_or(false, |t| upload_fs_ok(&t, &p))
+        };
+        assert!(check("Desktop/a.txt"));
+        assert!(check("n.txt"));
+        assert!(!check("Library/LaunchAgents/x.plist"));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", home.join("Desktop/link")).unwrap();
+            assert!(!check("Desktop/link/x"));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn revoke_cancels_jobs() {
+        let mut uploads: HashSet<i32> = [3, 1].into_iter().collect();
+        let ids = super::ed_files::revoke_ids(&mut uploads, vec![2, 3]);
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(uploads.is_empty());
+        assert!(super::ed_files::revoke_ids(&mut uploads, vec![]).is_empty());
     }
 
     #[cfg(feature = "everydesk")]
