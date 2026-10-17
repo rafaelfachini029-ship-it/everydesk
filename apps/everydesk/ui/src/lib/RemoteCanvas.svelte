@@ -5,6 +5,7 @@
   import type { ConnEvent } from './connecting/connecting.ts'
   import SessionPill from './session/SessionPill.svelte'
   import DropZone from './session/DropZone.svelte'
+  import { inputAllowed, viewOnly } from './session/more.ts'
   import {
     ALT_IDLE,
     altTapReducer,
@@ -36,6 +37,7 @@
     accumulateWheel,
     currentDisplay,
     displayList,
+    extras,
     mergeQuality,
     quality,
     resetSessionState,
@@ -189,6 +191,10 @@
   const heldKeys = new Set<string>()
   const wheelAcc = { x: 0, y: 0 }
   const NO_MODS: Modifiers = { alt: false, ctrl: false, shift: false, command: false }
+  // "Só olhar" (Review Focus 5): plain copy read on every event; `looking` drives the cursor.
+  let viewOnlyOn = false
+  let looking = $state(false)
+  const allowed = () => inputAllowed({ viewOnly: viewOnlyOn })
 
   /** Pointer over the visible pill: this event must not reach the remote (Review Focus 5). */
   function inDeadZone(e: MouseEvent): boolean {
@@ -224,6 +230,8 @@
     const held = heldButtons.size > 0
     if (!held && !captured && inDeadZone(e)) return
     if (shouldPeek({ y: e.clientY, held, captured })) pill?.peek()
+    // Só olhar: the top edge still brings the pill back; nothing goes to the remote.
+    if (!allowed()) return
     // A second button pressed/released while another is held arrives as a pointermove.
     if (e.button >= 0) {
       const bit = e.button === 1 ? 4 : e.button === 2 ? 2 : 1 << e.button
@@ -237,8 +245,9 @@
   function onPointerDown(e: PointerEvent) {
     e.preventDefault()
     if (!revealed || inDeadZone(e)) return
-    alt({ type: 'interrupt' })
     canvas.focus()
+    if (!allowed()) return
+    alt({ type: 'interrupt' })
     // Capture so the matching pointerup arrives even if released outside the window.
     canvas.setPointerCapture(e.pointerId)
     sendButton(domButton(e.button), true, e)
@@ -247,7 +256,7 @@
     e.preventDefault()
     // No dead-zone check: a drag released over the pill still lets go on the remote (and
     // sendButton drops ups for buttons the peer was never told about).
-    if (!revealed) return
+    if (!revealed || !allowed()) return
     sendButton(domButton(e.button), false, e)
     if (e.buttons === 0 && canvas.hasPointerCapture(e.pointerId)) {
       canvas.releasePointerCapture(e.pointerId)
@@ -255,7 +264,7 @@
   }
   function onWheel(e: WheelEvent) {
     e.preventDefault()
-    if (!revealed || inDeadZone(e)) return
+    if (!revealed || inDeadZone(e) || !allowed()) return
     alt({ type: 'interrupt' })
     const s = accumulateWheel(wheelAcc, e.deltaX, e.deltaY, e.deltaMode)
     const mask = mouseMask(MouseButton.none, MouseEvt.wheel)
@@ -269,7 +278,8 @@
   function alt(ev: AltEvent): boolean {
     const r = altTapReducer(altState, ev)
     altState = r.state
-    for (const k of r.send) {
+    // Só olhar: an Alt tap still summons the pill, but no held-back Alt goes out.
+    for (const k of allowed() ? r.send : []) {
       const name = keyName(k.code, 'Alt')
       if (!name) continue
       if (k.down) heldKeys.add(name)
@@ -287,6 +297,7 @@
         if (isAlt) e.preventDefault()
         return
       }
+      if (!allowed()) return
       const name = keyName(e.code, e.key)
       // A release always goes out for a key the peer holds, wherever focus went meanwhile.
       if (!name || !heldKeys.delete(name)) return
@@ -310,6 +321,7 @@
       e.preventDefault()
       return
     }
+    if (!allowed()) return
     const name = keyName(e.code, e.key)
     if (!name) return
     e.preventDefault()
@@ -411,6 +423,14 @@
     const down = (e: KeyboardEvent) => onKey(e, true)
     const up = (e: KeyboardEvent) => onKey(e, false)
     const hidden = () => document.hidden && releaseAll()
+    // Turning Só olhar on lets go of what the peer still holds first (the panel flips the
+    // store before it sends the toggle), then the gate closes.
+    const unextras = extras.subscribe((s) => {
+      const v = viewOnly(s)
+      if (v && !viewOnlyOn) releaseAll()
+      viewOnlyOn = v
+      looking = v
+    })
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
     window.addEventListener('blur', releaseAll)
@@ -427,6 +447,7 @@
       window.removeEventListener('keyup', up)
       window.removeEventListener('blur', releaseAll)
       document.removeEventListener('visibilitychange', hidden)
+      unextras()
       unlisten.forEach((p) => p.then((f) => f()))
     }
   })
@@ -438,6 +459,7 @@
   <canvas
     bind:this={canvas}
     tabindex={revealed ? 0 : -1}
+    class:looking
     onpointermove={onPointerMove}
     onpointerdown={onPointerDown}
     onpointerup={onPointerUp}
@@ -514,6 +536,10 @@
     outline: none;
     cursor: default;
     touch-action: none;
+  }
+  /* Só olhar: a plain pointer, nothing here acts on the remote */
+  canvas.looking {
+    cursor: default;
   }
   .overlay {
     position: absolute;

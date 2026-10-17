@@ -5,6 +5,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { writable } from 'svelte/store'
 import { EMPTY as NO_JOBS, jobsReducer, type JobsAction, type JobsState } from './session/jobs.ts'
+import { EXTRAS_EMPTY, extrasReducer, type ExtrasAction, type ExtrasState, type QualityLevel } from './session/more.ts'
 
 export interface DisplayRect {
   x: number
@@ -45,9 +46,14 @@ export const currentDisplay = writable(0)
 export const jobs = writable<JobsState>(NO_JOBS)
 export const dispatchJobs = (a: JobsAction) => jobs.update((s) => jobsReducer(s, a))
 
+/** Switches, quality and permissions of the "Mais" panel (session/more.ts). */
+export const extras = writable<ExtrasState>(EXTRAS_EMPTY)
+export const dispatchExtras = (a: ExtrasAction) => extras.update((s) => extrasReducer(s, a))
+
 export function resetSessionState() {
   quality.set(NO_QUALITY)
   jobs.set(NO_JOBS)
+  extras.set(EXTRAS_EMPTY)
   displayList.set([])
   currentDisplay.set(0)
 }
@@ -290,6 +296,15 @@ export const cancelJob = (id: number) => invoke('session_cancel_job', { id })
 export const answerOverride = (id: number, fileNum: number, overwrite: boolean, remember: boolean) =>
   invoke('session_override_answer', { id, fileNum, overwrite, remember })
 
+/** Flips one option (closed list in commands.rs) and answers its new state. */
+export const toggleOption = (name: string) => invoke<boolean>('session_toggle', { name })
+export const getToggles = () => invoke<Record<string, boolean>>('session_get_toggles')
+export const setQuality = (level: QualityLevel) => invoke('session_quality', { level })
+export const getQuality = () => invoke<string>('session_get_quality')
+export const restartRemote = () => invoke('session_restart')
+export const ctrlAltDel = () => invoke('session_ctrl_alt_del')
+export const lockRemote = () => invoke('session_lock')
+
 export const EVENTS = {
   displays: 'session:displays',
   connected: 'session:connected',
@@ -303,6 +318,7 @@ export const EVENTS = {
   jobFailed: 'session:job_failed',
   jobsDropped: 'session:jobs_dropped',
   permission: 'session:permission',
+  blockInput: 'session:block_input',
 } as const
 
 /** What a person types after hearing a code, as the backend's `memorable::normalize`: trim,

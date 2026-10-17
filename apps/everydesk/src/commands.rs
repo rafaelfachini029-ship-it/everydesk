@@ -4,6 +4,7 @@
 use crate::session::{is_current_gen, next_gen, TauriSessionHandler};
 use hbb_common::rendezvous_proto::ConnType;
 use librustdesk::ui_session_interface::{io_loop, Session};
+use std::collections::HashMap;
 use std::sync::{
     atomic::AtomicUsize,
     Arc, Mutex, RwLock,
@@ -180,6 +181,130 @@ pub fn session_frame_ack() {
     with_session(|s| s.ui_handler.frame_ack());
 }
 
+// ---- Session extras (Stage 4 Task 6) --------------------------------------------------
+
+/// The only options the webview may toggle (closed list; the engine's own names, see
+/// `LoginConfigHandler::toggle_option` in `src/client.rs`). Anything else is refused, so the
+/// UI can never reach `privacy-mode` (needs an impl key) or set arbitrary peer options.
+pub const TOGGLES: [&str; 7] = [
+    "view-only",
+    "disable-clipboard",
+    "disable-audio",
+    "show-remote-cursor",
+    "block-input",
+    "unblock-input",
+    "lock-after-session-end",
+];
+
+/// The toggles whose state the engine keeps (`get_toggle_option`). Block input is a request
+/// to the host, not a stored option: its state comes back as `session:block_input`.
+const STORED_TOGGLES: [&str; 5] = [
+    "view-only",
+    "disable-clipboard",
+    "disable-audio",
+    "show-remote-cursor",
+    "lock-after-session-end",
+];
+
+pub fn toggle_allowed(name: &str) -> bool {
+    TOGGLES.contains(&name)
+}
+
+/// UI level → engine image quality.
+pub fn quality_value(level: &str) -> Option<&'static str> {
+    match level {
+        "auto" => Some("balanced"),
+        "sharp" => Some("best"),
+        "smooth" => Some("low"),
+        _ => None,
+    }
+}
+
+/// Engine image quality → UI level (anything custom reads as automatic).
+pub fn quality_level(value: &str) -> &'static str {
+    match value {
+        "best" => "sharp",
+        "low" => "smooth",
+        _ => "auto",
+    }
+}
+
+pub fn clamp_fps(n: u32) -> i32 {
+    n.clamp(5, 60) as i32
+}
+
+fn require_session() -> Result<Session<TauriSessionHandler>, String> {
+    current().map(|(_, s)| s).ok_or_else(|| "Nenhuma sessão aberta".to_owned())
+}
+
+/// Flips one option of the running session and returns its new state. `block-input` /
+/// `unblock-input` return the state asked for; the host's answer arrives as
+/// `session:block_input`.
+#[tauri::command]
+pub fn session_toggle(name: String) -> Result<bool, String> {
+    if !toggle_allowed(&name) {
+        return Err(format!("Opção desconhecida: {name}"));
+    }
+    let s = require_session()?;
+    s.toggle_option(name.clone());
+    Ok(match name.as_str() {
+        "block-input" => true,
+        "unblock-input" => false,
+        _ => s.get_toggle_option(name),
+    })
+}
+
+/// The stored toggles of the running session (empty when there is none).
+#[tauri::command]
+pub fn session_get_toggles() -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    if let Some((_, s)) = current() {
+        for n in STORED_TOGGLES {
+            out.insert(n.to_owned(), s.get_toggle_option(n.to_owned()));
+        }
+    }
+    out
+}
+
+/// `"auto" | "sharp" | "smooth"`.
+#[tauri::command]
+pub fn session_quality(level: String) -> Result<(), String> {
+    let v = quality_value(&level).ok_or_else(|| format!("Qualidade desconhecida: {level}"))?;
+    require_session()?.save_image_quality(v.to_owned());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn session_get_quality() -> String {
+    current()
+        .map(|(_, s)| quality_level(&s.get_image_quality()).to_owned())
+        .unwrap_or_else(|| "auto".to_owned())
+}
+
+#[tauri::command]
+pub fn session_fps(n: u32) -> Result<(), String> {
+    require_session()?.set_custom_fps(clamp_fps(n));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn session_restart() -> Result<(), String> {
+    require_session()?.restart_remote_device();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn session_ctrl_alt_del() -> Result<(), String> {
+    require_session()?.ctrl_alt_del();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn session_lock() -> Result<(), String> {
+    require_session()?.lock_screen();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +318,46 @@ mod tests {
         assert_eq!(mouse_mask(MOUSE_BUTTON_RIGHT, MOUSE_TYPE_UP), 18);
         assert_eq!(mouse_mask(MOUSE_BUTTON_WHEEL, MOUSE_TYPE_DOWN), 33);
         assert_eq!(mouse_mask(0, MOUSE_TYPE_WHEEL), 3);
+    }
+    #[test]
+    fn toggles_are_engine_names() {
+        let client = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/client.rs"
+        ))
+        .expect("read src/client.rs");
+        for n in TOGGLES {
+            assert!(client.contains(&format!("\"{n}\"")), "{n} not in client.rs");
+        }
+        for n in STORED_TOGGLES {
+            assert!(toggle_allowed(n));
+        }
+    }
+
+    #[test]
+    fn toggle_list_is_closed() {
+        for n in ["privacy-mode", "follow-remote-window", "", "VIEW-ONLY", "custom-x"] {
+            assert!(!toggle_allowed(n), "{n}");
+        }
+        assert!(session_toggle("privacy-mode".into()).is_err());
+    }
+
+    #[test]
+    fn quality_mapping() {
+        assert_eq!(quality_value("auto"), Some("balanced"));
+        assert_eq!(quality_value("sharp"), Some("best"));
+        assert_eq!(quality_value("smooth"), Some("low"));
+        assert_eq!(quality_value("best"), None);
+        for l in ["auto", "sharp", "smooth"] {
+            assert_eq!(quality_level(quality_value(l).unwrap()), l);
+        }
+        assert_eq!(quality_level("custom"), "auto");
+    }
+
+    #[test]
+    fn fps_is_clamped() {
+        assert_eq!(clamp_fps(0), 5);
+        assert_eq!(clamp_fps(30), 30);
+        assert_eq!(clamp_fps(240), 60);
     }
 }

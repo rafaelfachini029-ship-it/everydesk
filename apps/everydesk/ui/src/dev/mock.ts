@@ -12,6 +12,14 @@ const contacts: Contact[] = [
   { peer_id: 'rio-coruja-21', name: 'Recepção', policy: { kind: 'Reconfirm', every_min: 45 }, online: false },
 ]
 
+const toggles: Record<string, boolean> = {
+  'view-only': false,
+  'disable-clipboard': false,
+  'disable-audio': false,
+  'show-remote-cursor': false,
+  'lock-after-session-end': false,
+}
+
 mockIPC(
   (cmd, args) => {
     switch (cmd) {
@@ -27,6 +35,17 @@ mockIPC(
         return simulateSend((args as { paths: string[] }).paths)
       case 'session_pick_and_send':
         return simulateSend(['Contrato assinado.pdf'])
+      // The "Mais" panel (/#mais): sound on, clipboard on, a host that does not allow restart.
+      case 'session_get_toggles':
+        return { ...toggles }
+      case 'session_get_quality':
+        return 'auto'
+      case 'session_toggle': {
+        const name = (args as { name: string }).name
+        if (name === 'block-input' || name === 'unblock-input') return name === 'block-input'
+        toggles[name] = !toggles[name]
+        return toggles[name]
+      }
       case 'session_connect':
         connecting((args as { frames: Channel<ArrayBuffer> }).frames)
         return null
@@ -88,7 +107,7 @@ if (location.hash === '#claro') {
 // /#aviso and /#senha-sessao: a session, then a notice / a password prompt over it (the
 // overlay is a modal dialog that owns the keyboard).
 const flow = location.hash.slice(1)
-const sessionFlow = flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
+const sessionFlow = flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
   const box = (kind: string, title: string, text: string) => emit('session:msgbox', { kind, title, text })
@@ -117,6 +136,11 @@ function connecting(frames: Channel<ArrayBuffer>) {
         emit('session:job_added', { id: done, name: 'planilha-contas.xlsx', to: '', total: 220e3 })
         at(500, () => emit('session:job', { id: done, file_num: 0, kind: 'done', speed: 0, finished: 0, err: null }))
       })
+    if (flow === 'mais') {
+      at(900, () => emit('session:permission', { name: 'restart', value: false }))
+      at(2600, () => document.querySelector<HTMLElement>('.dock .pill')?.focus())
+      at(2900, () => document.querySelector<HTMLButtonElement>('.more .tool')?.click())
+    }
     if (flow === 'senha-sessao') at(1500, () => box('re-input-password', 'Digite a senha de novo', 'A senha mudou na outra máquina.'))
   }
   if (flow === 'revela') {
@@ -170,7 +194,7 @@ function fakeFrame(w: number, h: number): ArrayBuffer {
   return buf
 }
 
-if (['busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos'].includes(flow))
+if (['busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return

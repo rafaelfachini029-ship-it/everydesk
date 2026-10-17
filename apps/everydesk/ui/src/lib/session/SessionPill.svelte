@@ -26,6 +26,7 @@
   import Icon from '../ui/Icon.svelte'
   import Pill from '../ui/Pill.svelte'
   import FileTrail from './FileTrail.svelte'
+  import MorePanel from './MorePanel.svelte'
   import type { Contact } from '../policy.ts'
   import { currentDisplay, dispatchJobs, displayList, jobs, pickAndSend, quality, switchDisplay } from '../session'
   import { overall, trailBusy } from './jobs.ts'
@@ -211,6 +212,7 @@
           <span class="sr-only">Qualidade automática{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
         </span>
 
+        <MorePanel active={expanded} {onreturn} />
         <span class="rule" aria-hidden="true"></span>
         <Button variant="danger" icon={PhoneOff} onclick={onend}>Encerrar</Button>
       </Pill>

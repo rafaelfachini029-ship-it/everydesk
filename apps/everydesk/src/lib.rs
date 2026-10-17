@@ -137,6 +137,7 @@ fn run() {
             commands::session_key,
             commands::session_switch_display,
             commands::session_frame_ack,
+            commands::session_toggle, commands::session_get_toggles, commands::session_quality, commands::session_get_quality, commands::session_fps, commands::session_restart, commands::session_ctrl_alt_del, commands::session_lock,
             files::session_send_files,
             files::session_pick_and_send,
             files::session_cancel_job,
