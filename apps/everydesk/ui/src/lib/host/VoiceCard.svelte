@@ -4,9 +4,11 @@
   por voz" with Recusar / Aceitar. The disc ripples like the controller's "chamando…" dot: the
   same call, seen from both ends. While the call is on, the badge itself reads "voz ligada"
   with "Encerrar voz" beside it (this machine's microphone is going out: it must stay visible).
-  The card does not live in the badge (whose entry transform would trap a fixed card): it is
-  moved to <body> and sits in the top-right corner, apart from the access-card stack (bottom
-  right) and the badges (bottom left). Focus, as for the access cards (Stage 3 rule): it goes
+  The card does not live in the badge (whose entry transform would trap it): it is moved into
+  the host card stack (HostStack, top right, shared with the elevation card), apart from the
+  access-card stack (bottom right) and the badges (bottom left). Unanswered for
+  RING_TIMEOUT_MS (60 s, as the controller gives up), it answers "Recusar" by itself.
+  Focus, as for the access cards (Stage 3 rule): it goes
   to the safe button (Recusar) unless the owner is typing, and an assertive live region says
   the request either way; when the card goes, the focus goes back where it was.
   State: voice.ts `hostVoice`, fed by `cm:voice` for this connection and hydrated from
@@ -26,8 +28,10 @@
   import type { Connected } from '../cm.ts'
   import { initials, mayTakeFocus } from '../cards/cards.ts'
   import { badgeLabel } from './badge.ts'
+  import { hostCard } from './HostStack.svelte'
   import {
     VOICE_BODY,
+    RING_TIMEOUT_MS,
     VOICE_EVENTS,
     hostVoice,
     hydrateVoice,
@@ -65,6 +69,13 @@
       un.then((f) => f())
       giveFocusBack()
     }
+  })
+
+  // Nobody answered: the controller has given up by now; refuse so nothing is left ringing.
+  $effect(() => {
+    if (call !== 'incoming') return
+    const t = setTimeout(() => answer(false), RING_TIMEOUT_MS)
+    return () => clearTimeout(t)
   })
 
   function set(next: HostVoice) {
@@ -127,11 +138,6 @@
     }
   }
 
-  /** Moves the card to <body>, out of the badge's transformed box. */
-  function toBody(node: HTMLElement) {
-    document.body.appendChild(node)
-    return { destroy: () => node.remove() }
-  }
 </script>
 
 <div class="sr-only" aria-live="assertive" aria-atomic="true">{announcement}</div>
@@ -147,7 +153,7 @@
 
 {#if call === 'incoming'}
   <div
-    use:toBody
+    use:hostCard={`voice-${conn.conn_id}`}
     bind:this={card}
     class="card"
     role="alertdialog"
@@ -206,12 +212,10 @@
     white-space: nowrap;
   }
 
+  /* placed by HostStack (top right, shared with the elevation card) */
   .card {
-    position: fixed;
-    top: var(--space-4);
-    right: var(--space-4);
-    z-index: 1000;
-    width: min(400px, calc(100vw - 2 * var(--space-4)));
+    position: relative;
+    width: min(400px, calc(100vw - 2 * var(--space-4) - 2 * 14px));
     box-sizing: border-box;
     display: grid;
     gap: var(--space-4);

@@ -13,6 +13,7 @@ const contacts: Contact[] = [
 ]
 
 let mockQuality = 'auto'
+const perms = { file: true, audio: false, recording: true, clipboard: true }
 const toggles: Record<string, boolean> = {
   'view-only': false,
   'disable-clipboard': false,
@@ -67,6 +68,14 @@ mockIPC(
       case 'session_record':
         setTimeout(() => emit('session:record', { on: (args as { start: boolean }).start }), 80)
         return null
+      // Host permissions (settings): sound off here, the rest on.
+      case 'cm_get_permissions':
+        return { ...perms }
+      case 'cm_set_permission': {
+        const { name, on } = args as { name: keyof typeof perms; on: boolean }
+        perms[name] = on
+        return null
+      }
       case 'recordings_dir':
         return '/Users/voce/Movies/EveryDesk'
       case 'cm_voice_answer': {
@@ -101,7 +110,7 @@ mockIPC(
         return {
           pending: [],
           connected:
-            location.hash === '#conectado' || location.hash === '#conversa-host' || location.hash === '#voz-host' || location.hash === '#gravar-host'
+            location.hash === '#conectado' || location.hash === '#pilha' || location.hash === '#conversa-host' || location.hash === '#voz-host' || location.hash === '#gravar-host'
               ? [
                   { conn_id: 1, peer_id: 'agua-lua-7', name: 'Mãe' },
                   { conn_id: 2, peer_id: 'pedra-gaviao-90', name: '' },
@@ -136,6 +145,16 @@ if (location.hash === '#foco' || location.hash === '#menu') {
   setTimeout(() => document.querySelector<HTMLInputElement>('.go input')?.focus(), 300)
   if (location.hash === '#menu')
     setTimeout(() => document.querySelector<HTMLButtonElement>('.card .more')?.click(), 900)
+}
+// /#conectado: Mãe sends a photo a moment after the badges show (C1, the badge's file line).
+if (location.hash === '#conectado') {
+  setTimeout(() => emit('cm:file', { conn_id: 1, id: 1, name: 'foto.jpg', size: 2.1 * 1024 * 1024, state: 'started', at: Date.now() }), 900)
+  setTimeout(() => emit('cm:file', { conn_id: 1, id: 1, name: 'foto.jpg', size: 2.1 * 1024 * 1024, state: 'done', at: Date.now() }), 1800)
+}
+// /#pilha: an elevation card and a voice request at once (the host card stack, I1).
+if (location.hash === '#pilha') {
+  setTimeout(() => emit('cm:elevation', { conn_id: 2, state: 'ask' }), 600)
+  setTimeout(() => emit('cm:voice', { conn_id: 1, incoming: true, active: false }), 900)
 }
 // /#claro: light theme, with the settings panel open.
 if (location.hash === '#claro') {

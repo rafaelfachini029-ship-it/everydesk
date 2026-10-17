@@ -3,6 +3,7 @@
   import IncomingCard from './lib/IncomingCard.svelte'
   import ConnectedBadge from './lib/host/ConnectedBadge.svelte'
   import ElevationCard from './lib/host/ElevationCard.svelte'
+  import HostStack from './lib/host/HostStack.svelte'
   import RemoteCanvas from './lib/RemoteCanvas.svelte'
   import { humanizeMsgbox, phaseFor, type ConnEvent } from './lib/connecting/connecting.ts'
   import { close, login, type MsgBox } from './lib/session'
@@ -89,5 +90,6 @@
   <Home onconnect={connect} bind:error={lastError} />
 {/if}
 <IncomingCard />
+<HostStack />
 <ConnectedBadge />
 <ElevationCard />

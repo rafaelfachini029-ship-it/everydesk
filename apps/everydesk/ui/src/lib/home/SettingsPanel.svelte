@@ -1,14 +1,47 @@
 <!--
-  SettingsPanel — the single quiet corner button and what sits behind it. For now only the
-  theme; the rest of the settings arrive in later tasks. A disclosure: the gear says whether
+  SettingsPanel — the single quiet corner button and what sits behind it: the theme, and what
+  someone who accesses this machine may do (four plain switches: files, sound, recording,
+  clipboard; `cm_get_permissions` / `cm_set_permission`, which also applies to whoever is
+  connected now). A disclosure: the gear says whether
   it is open (aria-expanded/aria-controls); Escape or "Fechar" closes it and puts the focus
   back on the gear.
 -->
 <script lang="ts">
   import Settings from 'lucide-svelte/icons/settings'
   import X from 'lucide-svelte/icons/x'
+  import { invoke } from '@tauri-apps/api/core'
   import Button from '../ui/Button.svelte'
+  import Toggle from '../cards/Toggle.svelte'
+  import { PERMISSION_ROWS, type PermissionName, type Permissions } from '../host/files.ts'
   import { applyTheme, storedTheme, type Theme } from './theme.ts'
+
+  let perms = $state<Permissions | null>(null)
+  let permError = $state('')
+
+  async function loadPerms() {
+    try {
+      perms = await invoke<Permissions>('cm_get_permissions')
+      permError = ''
+    } catch (e) {
+      console.warn('everydesk: cm_get_permissions', e)
+      permError = 'Não consegui ler as permissões.'
+    }
+  }
+
+  async function setPerm(name: PermissionName, on: boolean) {
+    if (!perms) return
+    permError = ''
+    try {
+      await invoke('cm_set_permission', { name, on })
+    } catch (e) {
+      perms = { ...perms, [name]: !on }
+      permError = `Não consegui mudar: ${e}`
+    }
+  }
+
+  $effect(() => {
+    if (open) loadPerms()
+  })
 
   let open = $state(false)
   let theme = $state<Theme>(document.documentElement.dataset.theme === 'light' ? 'light' : storedTheme())
@@ -61,6 +94,16 @@
           <button aria-pressed={theme === 'light'} onclick={() => choose('light')}>Claro</button>
         </div>
       </div>
+      <div class="opt perms" role="group" aria-labelledby="perms-label" aria-describedby="perms-hint">
+        <span id="perms-label">Quem acessar esta máquina pode</span>
+        {#if perms}
+          {#each PERMISSION_ROWS as row (row.name)}
+            <Toggle bind:checked={perms[row.name]} onchange={(on) => setPerm(row.name, on)}>{row.label}</Toggle>
+          {/each}
+        {/if}
+        <p id="perms-hint" class="perms-hint">Vale também para quem já está conectado.</p>
+        {#if permError}<p class="perms-error" role="alert">{permError}</p>{/if}
+      </div>
     </div>
   {/if}
 </div>
@@ -86,6 +129,9 @@
     display: grid;
     gap: var(--space-5);
     width: min(320px, calc(100vw - 2 * var(--space-4)));
+    max-height: calc(100svh - 44px - 3 * var(--space-4));
+    overflow-y: auto;
+    box-sizing: border-box;
     padding: var(--space-5);
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-lg);
@@ -119,6 +165,23 @@
     gap: var(--space-2);
     font-size: var(--fs-body);
     color: var(--text-muted);
+  }
+  .perms {
+    gap: var(--space-1);
+  }
+  .perms #perms-label {
+    margin-bottom: var(--space-1);
+  }
+  .perms-hint,
+  .perms-error {
+    margin: var(--space-1) 0 0;
+    font-size: var(--fs-label);
+  }
+  .perms-hint {
+    color: var(--text-muted);
+  }
+  .perms-error {
+    color: var(--danger);
   }
   .switch {
     display: grid;

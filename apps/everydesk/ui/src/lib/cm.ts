@@ -90,6 +90,8 @@ export interface CmSnapshot {
   offers: PairOffer[]
   identities: Identity[]
   reconfirms: ReconfirmSnapshot[]
+  /** Recent transfers to this machine (host/files.ts `CmFile`), oldest first. */
+  files?: import('./host/files.ts').CmFile[]
 }
 
 export interface Removed {

@@ -21,6 +21,7 @@
   import { DUR, prefersReducedMotion } from '../../design/motion'
   import { CM_EVENTS, type Removed } from '../cm'
   import Button from '../ui/Button.svelte'
+  import { hostCard } from './HostStack.svelte'
   import Icon from '../ui/Icon.svelte'
   import {
     ELEVATION_BODY,
@@ -92,6 +93,7 @@
 <div class="sr-only" aria-live="polite" aria-atomic="true">{announcement}</div>
 {#if card !== null}
   <div
+    use:hostCard={'elevation'}
     class="card"
     role="dialog"
     aria-modal="false"
@@ -120,12 +122,10 @@
 {/if}
 
 <style>
+  /* placed by HostStack (top right, shared with the voice card) */
   .card {
-    position: fixed;
-    top: var(--space-4);
-    right: var(--space-4);
-    z-index: 1001;
-    width: min(440px, calc(100vw - 2 * var(--space-4)));
+    position: relative;
+    width: min(440px, calc(100vw - 2 * var(--space-4) - 2 * 14px));
     box-sizing: border-box;
     display: grid;
     gap: var(--space-4);
