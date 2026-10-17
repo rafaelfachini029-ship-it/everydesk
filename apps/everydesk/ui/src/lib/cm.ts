@@ -40,15 +40,10 @@ export function identityNotice(id: Identity | undefined, name: string): Identity
   return { level: 'info', text: 'Identidade não verificada' }
 }
 
-/** "Lembrar este contato" exists only for a pair offer whose identity is not unverified. */
+/** "Lembrar este contato" exists only for a pair offer whose identity is not unverified.
+ *  Whether it starts ON is `rememberDefault` in cards/cards.ts (verified and no key change). */
 export function canRemember(id: Identity | undefined, offer: PairOffer | undefined): boolean {
   return !!offer && !!id && id.state !== 'unverified'
-}
-
-/** Spec 4.4: accepting a verified offer pairs by default (policy "Sempre perguntar"); a key
- *  change never defaults to remembering. */
-export function rememberByDefault(offer: PairOffer): boolean {
-  return !offer.key_changed
 }
 
 export interface Incoming {

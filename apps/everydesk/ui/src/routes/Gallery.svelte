@@ -20,6 +20,8 @@
   import Icon from '../lib/ui/Icon.svelte'
   import Ring from '../lib/ui/Ring.svelte'
   import Pill from '../lib/ui/Pill.svelte'
+  import AccessCard from '../lib/cards/AccessCard.svelte'
+  import ReconfirmCard from '../lib/ReconfirmCard.svelte'
 
   type View = 'ambos' | 'escuro' | 'claro'
   const views: { id: View; name: string }[] = [
@@ -44,6 +46,10 @@
   let remaining = $state(60)
   const tick = setInterval(() => (remaining = remaining > 0 ? remaining - 1 : 60), 1000)
   onDestroy(() => clearInterval(tick))
+
+  // moment 4: request cards (fixtures)
+  let keep = $state({ on: true, policy: 'ask', replaceKey: false })
+  const ringNow = 1_000_000
 
   let destination = $state('')
   let loading = $state(false)
@@ -124,6 +130,44 @@
           {@render sessionPill(false)}
           {@render sessionPill(true)}
           <p class="t-body muted">Passe o mouse ou use Tab para abrir. Fecha sozinha em 2 segundos.</p>
+        </div>
+
+        <div class="block cards">
+          <p class="t-body muted">Momento 4: pedido de acesso e reconfirmação.</p>
+          <AccessCard
+            name="Marta Souza"
+            code="lua-azul-sete"
+            {remaining}
+            identity={{ conn_id: 1, state: 'verified', known: true }}
+            rememberable={true}
+            keyChanged={false}
+            remember={keep}
+            onremember={(on) => (keep = { ...keep, on })}
+            onpolicy={(policy) => (keep = { ...keep, policy })}
+            onreplacekey={() => {}}
+            onaccept={() => {}}
+            ondeny={() => {}}
+          />
+          <AccessCard
+            name="Notebook da Ana"
+            code="sol-verde-dois"
+            remaining={17}
+            identity={{ conn_id: 2, state: 'unverified', known: true }}
+            rememberable={false}
+            keyChanged={false}
+            onremember={() => {}}
+            onpolicy={() => {}}
+            onreplacekey={() => {}}
+            onaccept={() => {}}
+            ondeny={() => {}}
+          />
+          <ReconfirmCard
+            name="Marta Souza"
+            start={ringNow - 36_000}
+            ringSecs={60}
+            now={ringNow}
+            onanswer={() => {}}
+          />
         </div>
       </section>
     {/each}
@@ -249,6 +293,10 @@
     background:
       linear-gradient(135deg, var(--surface-2), var(--surface) 60%),
       var(--surface);
+  }
+
+  .cards {
+    justify-items: start;
   }
 
   @media (max-width: 640px) {

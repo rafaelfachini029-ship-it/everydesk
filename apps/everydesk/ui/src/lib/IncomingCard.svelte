@@ -13,7 +13,6 @@
     canRemember,
     identityNotice,
     remainingSeconds,
-    rememberByDefault,
     type CmSnapshot,
     type Connected,
     type Identity,
@@ -23,13 +22,16 @@
     type Removed,
   } from './cm'
   import { policyFromKey } from './policy'
-  import PolicySelect from './PolicySelect.svelte'
   import ReconfirmCard from './ReconfirmCard.svelte'
+  import AccessCard from './cards/AccessCard.svelte'
+  import { expire, rememberDefault, stackOffset } from './cards/cards'
+  import Button from './ui/Button.svelte'
 
   type Pending = Incoming & { start: number }
   type Ring = Reconfirm & { start: number }
-  /** Per-prompt answers of the "lembrar" controls. */
-  type Remember = { on: boolean; policy: string; replaceKey: boolean }
+  /** Per-prompt answers of the "lembrar" controls. `touched`: the owner flipped "lembrar",
+   *  so a late `cm:identity` no longer changes its default. */
+  type Remember = { on: boolean; policy: string; replaceKey: boolean; touched: boolean }
 
   let pending = $state<Pending[]>([])
   let connected = $state<Connected[]>([])
@@ -46,11 +48,32 @@
     offers = { ...offers, [o.conn_id]: o }
     if (!remember[o.conn_id]) {
       // Spec 4.4: accepting a verified offer pairs by default, policy "Sempre perguntar".
+      // Default ON only for a verified identity without a key change (cards.ts).
       remember = {
         ...remember,
-        [o.conn_id]: { on: rememberByDefault(o), policy: 'ask', replaceKey: false },
+        [o.conn_id]: {
+          on: rememberDefault(identities[o.conn_id], o.key_changed),
+          policy: 'ask',
+          replaceKey: false,
+          touched: false,
+        },
       }
     }
+  }
+
+  function addIdentity(i: Identity) {
+    identities = { ...identities, [i.conn_id]: i }
+    // The identity may arrive after the offer: recompute the default until the owner answers.
+    const o = offers[i.conn_id]
+    const r = remember[i.conn_id]
+    if (o && r && !r.touched) {
+      remember = { ...remember, [i.conn_id]: { ...r, on: rememberDefault(i, o.key_changed) } }
+    }
+  }
+
+  function setRemember(connId: number, patch: Partial<Remember>) {
+    const r = remember[connId]
+    if (r) remember = { ...remember, [connId]: { ...r, ...patch } }
   }
 
   function forget(connId: number) {
@@ -84,7 +107,8 @@
           connId: p.conn_id,
           accepted: true,
           policy: policyFromKey(r.policy),
-          replaceKey: r.replaceKey,
+          // Only over a key change, and only after its own explicit toggle.
+          replaceKey: !!offers[p.conn_id]?.key_changed && r.replaceKey,
         })
       } else {
         await invoke('cm_authorize', { connId: p.conn_id })
@@ -131,9 +155,7 @@
       }),
       listen<Removed>(CM_EVENTS.removed, (e) => drop(e.payload.conn_id)),
       listen<PairOffer>(CM_EVENTS.pairOffer, (e) => addOffer(e.payload)),
-      listen<Identity>(CM_EVENTS.identity, (e) => {
-        identities = { ...identities, [e.payload.conn_id]: e.payload }
-      }),
+      listen<Identity>(CM_EVENTS.identity, (e) => addIdentity(e.payload)),
       listen<Reconfirm>(CM_EVENTS.reconfirm, (e) => {
         const r = e.payload
         rings = [...rings.filter((x) => x.conn_id !== r.conn_id), { ...r, start: Date.now() }]
@@ -152,10 +174,8 @@
         for (const c of snap.connected) {
           if (!connected.some((x) => x.conn_id === c.conn_id)) connected = [...connected, c]
         }
+        for (const i of snap.identities) if (!identities[i.conn_id]) addIdentity(i)
         for (const o of snap.offers) if (!offers[o.conn_id]) addOffer(o)
-        for (const i of snap.identities) {
-          if (!identities[i.conn_id]) identities = { ...identities, [i.conn_id]: i }
-        }
         for (const { age_ms, ...r } of snap.reconfirms) {
           if (!rings.some((x) => x.conn_id === r.conn_id)) rings = [...rings, { ...r, start: t - age_ms }]
         }
@@ -164,8 +184,8 @@
     const timer = setInterval(() => {
       now = Date.now()
       // The engine closes an unanswered prompt itself; just drop the card at 0.
-      pending = pending.filter((p) => remainingSeconds(p.start, now) > 0)
-      rings = rings.filter((r) => remainingSeconds(r.start, now, r.ring_secs) > 0)
+      pending = expire(pending, now)
+      rings = expire(rings, now)
     }, 250)
     return () => {
       clearInterval(timer)
@@ -174,59 +194,46 @@
   })
 </script>
 
+<!-- Bottom-right corner. Cards stack upward from the corner (oldest nearest it), each one
+     step further in (stackOffset), so two requests never read as one. -->
 <div class="cm">
+  <div class="stack">
+    {#each rings as r, i (`r${r.conn_id}`)}
+      <ReconfirmCard
+        name={nameOf(r.conn_id)}
+        start={r.start}
+        ringSecs={r.ring_secs}
+        {now}
+        offset={stackOffset(i)}
+        onanswer={(ok) => answerRing(r.conn_id, ok)}
+      />
+    {/each}
+    {#each pending as p, i (`p${p.conn_id}`)}
+      {@const o = offers[p.conn_id]}
+      <AccessCard
+        name={p.name || p.peer_id}
+        code={p.peer_id}
+        isFileTransfer={p.is_file_transfer}
+        remaining={remainingSeconds(p.start, now)}
+        offset={stackOffset(rings.length + i)}
+        identity={identities[p.conn_id]}
+        rememberable={canRemember(identities[p.conn_id], o)}
+        keyChanged={!!o?.key_changed}
+        remember={remember[p.conn_id]}
+        error={errors[p.conn_id]}
+        busy={busy[p.conn_id]}
+        onremember={(on) => setRemember(p.conn_id, { on, touched: true, replaceKey: false })}
+        onpolicy={(policy) => setRemember(p.conn_id, { policy })}
+        onreplacekey={(replaceKey) => setRemember(p.conn_id, { replaceKey })}
+        onaccept={() => accept(p)}
+        ondeny={() => close(p.conn_id)}
+      />
+    {/each}
+  </div>
   {#each connected as c (c.conn_id)}
-    <div class="connected">
-      <span>Conectado: {c.name || c.peer_id}</span>
-      <button onclick={() => close(c.conn_id)}>Encerrar</button>
-    </div>
-  {/each}
-  {#each rings as r (r.conn_id)}
-    <ReconfirmCard
-      name={nameOf(r.conn_id)}
-      start={r.start}
-      ringSecs={r.ring_secs}
-      {now}
-      onanswer={(ok) => answerRing(r.conn_id, ok)}
-    />
-  {/each}
-  {#each pending as p (p.conn_id)}
-    {@const notice = identityNotice(identities[p.conn_id], p.name || p.peer_id)}
-    <div class="card">
-      <strong>Pedido de acesso{p.is_file_transfer ? ' (arquivos)' : ''}</strong>
-      <div>ID: {p.peer_id}</div>
-      <div>Nome: {p.name}</div>
-      {#if notice}
-        <p class={notice.level === 'loud' ? 'warn loud' : 'unverified'}>{notice.text}</p>
-      {/if}
-      {#if canRemember(identities[p.conn_id], offers[p.conn_id]) && remember[p.conn_id]}
-        {@const o = offers[p.conn_id]}
-        {#if o.key_changed}
-          <p class="warn">A chave desta máquina mudou. Só marque "lembrar" se tiver certeza.</p>
-        {/if}
-        <label>
-          <input type="checkbox" bind:checked={remember[p.conn_id].on} />
-          Lembrar este contato
-        </label>
-        {#if remember[p.conn_id].on}
-          <PolicySelect
-            value={remember[p.conn_id].policy}
-            onchange={(key) => (remember[p.conn_id].policy = key)}
-          />
-          {#if o.key_changed}
-            <label>
-              <input type="checkbox" bind:checked={remember[p.conn_id].replaceKey} />
-              Substituir chave guardada
-            </label>
-          {/if}
-        {/if}
-      {/if}
-      {#if errors[p.conn_id]}<p class="warn">{errors[p.conn_id]}</p>{/if}
-      <div class="actions">
-        <button onclick={() => accept(p)} disabled={busy[p.conn_id]}>Aceitar</button>
-        <button onclick={() => close(p.conn_id)}>Recusar</button>
-        <span class="count">{remainingSeconds(p.start, now)} s</span>
-      </div>
+    <div class="connected t-label">
+      <span>Conectado: <strong>{c.name || c.peer_id}</strong></span>
+      <Button variant="danger" onclick={() => close(c.conn_id)}>Encerrar</Button>
     </div>
   {/each}
 </div>
@@ -234,52 +241,42 @@
 <style>
   .cm {
     position: fixed;
-    right: 12px;
-    bottom: 12px;
+    right: var(--space-4);
+    bottom: var(--space-4);
+    z-index: 1000;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    z-index: 1000;
-    max-width: 320px;
+    align-items: flex-end;
+    gap: var(--space-3);
+    max-height: calc(100vh - 2 * var(--space-4));
+    overflow-y: auto;
+    font-family: var(--font-ui);
+    pointer-events: none;
   }
-  .card,
+  .stack {
+    display: flex;
+    flex-direction: column-reverse;
+    align-items: flex-end;
+    gap: var(--space-3);
+  }
+  .stack > :global(*),
   .connected {
-    background: #fff;
-    color: #000;
-    border: 1px solid #888;
-    padding: 8px 10px;
-    font-size: 14px;
+    pointer-events: auto;
   }
   .connected {
     display: flex;
-    gap: 8px;
     align-items: center;
-    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-5);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-pill);
+    background: var(--surface-glass);
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow-float);
+    color: var(--text);
   }
-  .actions {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    margin-top: 6px;
-  }
-  .count {
-    margin-left: auto;
-  }
-  label {
-    display: block;
-    margin-top: 4px;
-  }
-  .warn {
-    color: #b00;
-    margin: 4px 0;
-  }
-  .loud {
-    font-weight: bold;
-    border: 2px solid #b00;
-    padding: 4px;
-  }
-  .unverified {
-    color: #8a5a00;
-    margin: 4px 0;
+  .connected :global(.btn.danger:not(:hover)) {
+    background: transparent;
   }
 </style>

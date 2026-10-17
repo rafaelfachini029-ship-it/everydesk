@@ -23,7 +23,7 @@ test('remainingSeconds clamps a clock that went backwards', () => {
 })
 
 test('identity notice, remember gating and default', async () => {
-  const { identityNotice, canRemember, rememberByDefault } = await import('../src/lib/cm.ts')
+  const { identityNotice, canRemember } = await import('../src/lib/cm.ts')
   const id = (state: 'verified' | 'unverified' | 'key_changed', known: boolean) => ({
     conn_id: 1,
     state,
@@ -45,7 +45,5 @@ test('identity notice, remember gating and default', async () => {
   assert.equal(canRemember(id('verified', false), undefined), false)
   assert.equal(canRemember(id('verified', false), offer), true)
   assert.equal(canRemember(id('key_changed', true), { ...offer, key_changed: true }), true)
-  // Accept pairs by default, except over a key change.
-  assert.equal(rememberByDefault(offer), true)
-  assert.equal(rememberByDefault({ ...offer, key_changed: true }), false)
+  // The default of "lembrar" lives in cards.ts (tests/cards.test.ts: rememberDefault).
 })
