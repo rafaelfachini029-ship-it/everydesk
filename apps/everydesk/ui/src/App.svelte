@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import IncomingCard from './lib/IncomingCard.svelte'
   import ConnectedBadge from './lib/host/ConnectedBadge.svelte'
+  import ElevationCard from './lib/host/ElevationCard.svelte'
   import RemoteCanvas from './lib/RemoteCanvas.svelte'
   import { humanizeMsgbox, phaseFor, type ConnEvent } from './lib/connecting/connecting.ts'
   import { close, login, type MsgBox } from './lib/session'
@@ -89,3 +90,4 @@
 {/if}
 <IncomingCard />
 <ConnectedBadge />
+<ElevationCard />

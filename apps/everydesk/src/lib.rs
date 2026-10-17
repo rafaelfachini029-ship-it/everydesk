@@ -139,6 +139,7 @@ fn run() {
             cm::cm_pending,
             cm::cm_reconfirm_result,
             cm::cm_pair_ack,
+            cm::cm_elevate, cm::cm_elevation_dismiss, cm::cm_elevation_setting, cm::cm_elevation_set_setting, cm::cm_elevation_pending,
             contacts::contacts_list,
             contacts::contacts_set_policy,
             contacts::contacts_remove,

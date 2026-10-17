@@ -8,7 +8,11 @@
 //! an authorized session; the session keeps streaming meanwhile),
 //! `cm:identity {conn_id, state: "verified"|"unverified"|"key_changed", known}` (who is
 //! asking, sent for every prompt right after its `cm:incoming`; `known`: the claimed id is in
-//! one of the books, so an unverified or re-keyed claim is a loud warning).
+//! one of the books, so an unverified or re-keyed claim is a loud warning),
+//! `cm:elevation {conn_id, state: "ask"|"auto"|"done"}` (Windows portable run: the controller
+//! needs administrator rights; "ask" shows the card once per episode, "auto" means the
+//! remembered choice already asked Windows for it, "done" means the elevated helper runs or
+//! is no longer needed).
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
@@ -116,6 +120,7 @@ pub struct CmState {
     offers: BTreeMap<i32, PairOffer>,
     identities: BTreeMap<i32, Identity>,
     reconfirms: BTreeMap<i32, (Reconfirm, Instant)>,
+    elevation: Elevation,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -198,6 +203,7 @@ impl CmState {
     }
 
     pub fn remove(&mut self, conn_id: i32) {
+        self.elevation.remove(conn_id);
         self.pending.remove(&conn_id);
         self.connected.remove(&conn_id);
         self.offers.remove(&conn_id);
@@ -227,6 +233,124 @@ impl CmState {
                 })
                 .collect(),
         }
+    }
+}
+
+/// Config option holding the remembered answer to the elevation card: "Y" elevate without
+/// asking, "N" never ask, anything else ask.
+pub const AUTO_ELEVATE_OPTION: &str = "everydesk-auto-elevate";
+
+/// What to do when the engine says administrator rights are needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// Remembered "Permitir sempre": request the elevated helper without asking.
+    Auto,
+    /// Show the card.
+    Ask,
+    /// Nothing: not needed, not possible here (installed, or not Windows), or "não perguntar
+    /// mais".
+    Skip,
+}
+
+pub fn elevation_decision(remembered: &str, show: bool, can: bool) -> Decision {
+    if !show || !can {
+        return Decision::Skip;
+    }
+    match remembered {
+        "Y" => Decision::Auto,
+        "N" => Decision::Skip,
+        _ => Decision::Ask,
+    }
+}
+
+/// The remembered answer as the UI sees it: "Y", "N" or "" (ask).
+pub fn normalize_setting(v: &str) -> &'static str {
+    match v {
+        "Y" => "Y",
+        "N" => "N",
+        _ => "",
+    }
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ElevationState {
+    Ask,
+    Auto,
+    Done,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct ElevationEvent {
+    pub conn_id: i32,
+    pub state: ElevationState,
+}
+
+/// One "needs elevation" episode. The engine repeats `show_elevation(true)` every second per
+/// connection (`portable_check`) until the helper runs, so the card (or the automatic
+/// request) happens once per episode; the episode ends on `show == false` or when its
+/// connection goes. A dismissed card stays dismissed for the episode.
+#[derive(Default, Debug)]
+struct Elevation {
+    /// Connection the episode was decided for.
+    latched: Option<i32>,
+    /// The card is up and unanswered.
+    asking: bool,
+}
+
+impl Elevation {
+    /// `target`: the session the request is routed through (`show_elevation` carries no id;
+    /// the helper is machine-wide, so any authorized session does). Before any session is
+    /// authorized nothing latches, so the first tick after the accept decides.
+    fn step(&mut self, show: bool, target: Option<i32>, d: Decision) -> Option<ElevationEvent> {
+        if !show {
+            let conn_id = self.latched.take()?;
+            self.asking = false;
+            return Some(ElevationEvent {
+                conn_id,
+                state: ElevationState::Done,
+            });
+        }
+        if self.latched.is_some() {
+            return None;
+        }
+        let conn_id = target?;
+        self.latched = Some(conn_id);
+        let state = match d {
+            Decision::Auto => ElevationState::Auto,
+            Decision::Ask => {
+                self.asking = true;
+                ElevationState::Ask
+            }
+            Decision::Skip => return None,
+        };
+        Some(ElevationEvent { conn_id, state })
+    }
+
+    fn answered(&mut self) {
+        self.asking = false;
+    }
+
+    fn remove(&mut self, conn_id: i32) {
+        if self.latched == Some(conn_id) {
+            *self = Self::default();
+        }
+    }
+
+    fn pending(&self) -> Option<i32> {
+        self.latched.filter(|_| self.asking)
+    }
+}
+
+impl CmState {
+    /// Newest authorized session, the one an elevation request is routed through.
+    fn elevation_target(&self) -> Option<i32> {
+        self.connected.keys().next_back().copied()
+    }
+
+    fn elevation_step(&mut self, show: bool, d: Decision) -> Option<ElevationEvent> {
+        let target = self.elevation_target();
+        self.elevation.step(show, target, d)
     }
 }
 
@@ -275,11 +399,22 @@ impl InvokeUiCM for TauriCM {
         }
     }
 
-    // TODO etapa 3/4: chat, theme, language, elevation, voice call, file transfer log.
+    // TODO etapa 3/4: chat, theme, language, voice call, file transfer log.
     fn new_message(&self, _id: i32, _text: String) {}
     fn change_theme(&self, _dark: String) {}
     fn change_language(&self) {}
-    fn show_elevation(&self, _show: bool) {}
+    fn show_elevation(&self, show: bool) {
+        let remembered = Config::get_option(AUTO_ELEVATE_OPTION);
+        let d = elevation_decision(&remembered, show, ui_cm_interface::can_elevate());
+        let Some(ev) = with_state(|s| s.elevation_step(show, d)) else {
+            return;
+        };
+        log::info!("everydesk: elevation #{} {:?}", ev.conn_id, ev.state);
+        if ev.state == ElevationState::Auto {
+            ui_cm_interface::elevate_portable(ev.conn_id);
+        }
+        self.emit("cm:elevation", ev);
+    }
     fn update_voice_call_state(&self, _client: &Client) {}
     fn file_transfer_log(&self, _action: &str, _log: &str) {}
 
@@ -396,6 +531,51 @@ pub fn cm_pair_ack(
     Ok(())
 }
 
+/// "Permitir sempre" (`remember`) / "Só desta vez" on the elevation card: Windows shows its
+/// UAC prompt on this machine; `cm:elevation done` follows once the helper runs.
+#[tauri::command]
+pub fn cm_elevate(conn_id: i32, remember: bool) {
+    log::info!("everydesk: elevate #{conn_id} (remember={remember})");
+    if remember {
+        Config::set_option(AUTO_ELEVATE_OPTION.to_owned(), "Y".to_owned());
+    }
+    with_state(|s| s.elevation.answered());
+    ui_cm_interface::elevate_portable(conn_id);
+}
+
+/// "Agora não" (this episode only) / "não perguntar mais" (`remember_no`: never ask until
+/// changed in the settings).
+#[tauri::command]
+pub fn cm_elevation_dismiss(remember_no: bool) {
+    log::info!("everydesk: elevation dismissed (remember_no={remember_no})");
+    if remember_no {
+        Config::set_option(AUTO_ELEVATE_OPTION.to_owned(), "N".to_owned());
+    }
+    with_state(|s| s.elevation.answered());
+}
+
+/// The remembered answer: "Y" (elevate without asking), "N" (never ask) or "" (ask).
+#[tauri::command]
+pub fn cm_elevation_setting() -> String {
+    normalize_setting(&Config::get_option(AUTO_ELEVATE_OPTION)).to_owned()
+}
+
+/// Changes the remembered answer (for the settings toggle); "" goes back to asking.
+#[tauri::command]
+pub fn cm_elevation_set_setting(value: String) -> Result<(), String> {
+    if normalize_setting(&value) != value {
+        return Err(format!("invalid elevation setting {value:?}"));
+    }
+    Config::set_option(AUTO_ELEVATE_OPTION.to_owned(), value);
+    Ok(())
+}
+
+/// The connection whose elevation card is up and unanswered, for the UI to hydrate on mount.
+#[tauri::command]
+pub fn cm_elevation_pending() -> Option<i32> {
+    with_state(|s| s.elevation.pending())
+}
+
 #[tauri::command]
 pub fn cm_close(conn_id: i32) {
     log::info!("everydesk: close #{conn_id}");
@@ -486,6 +666,72 @@ mod tests {
             librustdesk::client::LOGIN_MSG_TIMEOUT,
             "Pedido não respondido em 60 s"
         );
+    }
+
+    #[test]
+    fn elevation_decision_table() {
+        use Decision::*;
+        let cases = [
+            ("Y", true, true, Auto),
+            ("N", true, true, Skip),
+            ("", true, true, Ask),
+            ("garbage", true, true, Ask),
+            ("Y", true, false, Skip),
+            ("", true, false, Skip),
+            ("Y", false, true, Skip),
+            ("", false, true, Skip),
+        ];
+        for (rem, show, can, want) in cases {
+            assert_eq!(elevation_decision(rem, show, can), want, "{rem:?} show={show} can={can}");
+        }
+        assert_eq!(normalize_setting("Y"), "Y");
+        assert_eq!(normalize_setting("N"), "N");
+        assert_eq!(normalize_setting("yes"), "");
+    }
+
+    #[test]
+    fn elevation_happens_once_per_episode() {
+        let t0 = Instant::now();
+        let mut s = CmState::default();
+        let ev = |conn_id, state| Some(ElevationEvent { conn_id, state });
+        // Before any authorized session: nothing latches.
+        s.apply(&event_from(1, false, "a", "a", false), t0);
+        assert_eq!(s.elevation_step(true, Decision::Ask), None);
+        s.authorize(1);
+        assert_eq!(s.elevation_step(true, Decision::Ask), ev(1, ElevationState::Ask));
+        assert_eq!(s.elevation.pending(), Some(1));
+        // Repeated ticks while up: silent.
+        assert_eq!(s.elevation_step(true, Decision::Ask), None);
+        // Answered ("Agora não"): stays quiet for the episode.
+        s.elevation.answered();
+        assert_eq!(s.elevation.pending(), None);
+        assert_eq!(s.elevation_step(true, Decision::Ask), None);
+        // Helper runs: done once, then a new episode may ask again.
+        assert_eq!(s.elevation_step(false, Decision::Skip), ev(1, ElevationState::Done));
+        assert_eq!(s.elevation_step(false, Decision::Skip), None);
+        assert_eq!(s.elevation_step(true, Decision::Auto), ev(1, ElevationState::Auto));
+        assert_eq!(s.elevation_step(true, Decision::Auto), None);
+        // The session goes: the episode ends with it; the newest session is the target.
+        s.apply(&event_from(2, true, "b", "b", false), t0);
+        s.apply(&event_from(3, true, "c", "c", false), t0);
+        s.remove(1);
+        assert_eq!(s.elevation_step(true, Decision::Ask), ev(3, ElevationState::Ask));
+        s.remove(3);
+        assert_eq!(s.elevation.pending(), None);
+        // "não perguntar mais": latched without an event, so no card on every tick.
+        assert_eq!(s.elevation_step(true, Decision::Skip), None);
+        assert_eq!(s.elevation.latched, Some(2));
+        assert_eq!(s.elevation_step(false, Decision::Skip), ev(2, ElevationState::Done));
+    }
+
+    #[test]
+    fn elevation_event_serializes_for_the_ui() {
+        let v = serde_json::to_value(ElevationEvent {
+            conn_id: 5,
+            state: ElevationState::Ask,
+        })
+        .unwrap();
+        assert_eq!(v, serde_json::json!({"conn_id": 5, "state": "ask"}));
     }
 
     #[test]
