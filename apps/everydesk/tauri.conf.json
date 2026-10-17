@@ -13,8 +13,11 @@
     "windows": [
       {
         "title": "EveryDesk",
-        "width": 480,
-        "height": 420,
+        "width": 1100,
+        "height": 720,
+        "minWidth": 600,
+        "minHeight": 400,
+        "center": true,
         "resizable": true,
         "fullscreen": false
       }

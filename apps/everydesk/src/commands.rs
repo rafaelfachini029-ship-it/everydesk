@@ -69,7 +69,7 @@ pub fn session_connect(
 ) -> Result<(), String> {
     let id = id.trim().replace(' ', "");
     if id.is_empty() {
-        return Err("ID remoto vazio".into());
+        return Err("Código vazio".into());
     }
     close_current();
 
