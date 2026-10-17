@@ -87,6 +87,14 @@ export interface Phase {
 const isError = (kind: string) => kind.includes('error')
 const boxText = (b: MsgBox) => b.text || b.title
 
+/** A message over a live session, in plain Portuguese. An unrecognised notice that is not an
+ *  error is not a failure: it says so neutrally, the engine's text behind "Detalhes". */
+export function humanizeLive(box: MsgBox): Humanized {
+  const h = humanizeMsgbox(box.kind, boxText(box), { phase: 'live' })
+  if (h.title === UNKNOWN && !isError(box.kind)) return { ...h, title: 'Aviso da outra máquina.' }
+  return h
+}
+
 /** Folds the events of one attempt into what the screen says. A frame wins over
  *  everything (the session view owns any later message); before it, the first error ends
  *  the attempt; otherwise the furthest step reached shows. */

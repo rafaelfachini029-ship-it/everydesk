@@ -64,6 +64,12 @@ export function nearTopEdge(clientY: number, edge = TOP_EDGE_PX): boolean {
   return clientY >= 0 && clientY <= edge
 }
 
+/** The top edge brings the pill back, but never mid-drag: with a button held (or the screen
+ *  holding the pointer) a peek would put the pill under the pointer and cut the drag short. */
+export function shouldPeek(p: { y: number; held: boolean; captured: boolean }): boolean {
+  return !p.held && !p.captured && nearTopEdge(p.y)
+}
+
 // ---- Alt tap ------------------------------------------------------------------------
 //
 // A bare Alt tap summons the pill and must never reach the remote (on Windows it would

@@ -13,6 +13,7 @@ import {
   isDeadZone,
   nearTopEdge,
   shouldForwardKey,
+  shouldPeek,
 } from '../src/lib/session/sessionPill.ts'
 import { mergeQuality } from '../src/lib/session.ts'
 
@@ -143,4 +144,14 @@ test('quality readings merge: missing fields keep the last value', () => {
   assert.deepEqual(a, { fps: null, delay: 32, speed: null })
   const b = mergeQuality(a, { fps: 30, delay: null })
   assert.deepEqual(b, { fps: 30, delay: 32, speed: null })
+})
+
+test('the top edge peeks the pill, but never mid-drag (a held button or pointer capture)', () => {
+  assert.equal(shouldPeek({ y: 0, held: false, captured: false }), true)
+  assert.equal(shouldPeek({ y: 8, held: false, captured: false }), true)
+  assert.equal(shouldPeek({ y: 9, held: false, captured: false }), false)
+  assert.equal(shouldPeek({ y: 0, held: true, captured: false }), false)
+  assert.equal(shouldPeek({ y: 0, held: false, captured: true }), false)
+  assert.equal(shouldPeek({ y: 0, held: true, captured: true }), false)
+  assert.equal(shouldPeek({ y: -3, held: false, captured: false }), false)
 })

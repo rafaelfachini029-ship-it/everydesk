@@ -9,13 +9,14 @@
     ALT_IDLE,
     altTapReducer,
     isDeadZone,
-    nearTopEdge,
     shouldForwardKey,
+    shouldPeek,
     type AltEvent,
   } from './session/sessionPill.ts'
   import Button from './ui/Button.svelte'
   import Field from './ui/Field.svelte'
   import { tick } from 'svelte'
+  import { humanizeLive } from './connecting/connecting.ts'
   import {
     EVENTS,
     FRAME_HEADER_LEN,
@@ -67,6 +68,8 @@
   // Hidden (clipped to nothing) until the first frame; until then the connecting screen
   // shows the progress and any message.
   let revealed = $state(false)
+  // The reveal animation is over: the clip goes, so later repaints are never masked.
+  let settled = $state(false)
   let root: HTMLElement
   let dialog: HTMLElement | undefined = $state()
   const uid = $props.id()
@@ -76,6 +79,8 @@
   const needsPassword = $derived(
     msg !== null && (msg.kind === 'input-password' || msg.kind === 're-input-password'),
   )
+  // What the dialog says: plain Portuguese; the engine's own text only behind "Detalhes".
+  const said = $derived(msg ? humanizeLive(msg) : null)
 
   // Dev-only frame-time probe around putImageData (docs/design/latencia-etapa3.md).
   const probe = import.meta.env.DEV ? { n: 0, sum: 0, max: 0 } : null
@@ -137,6 +142,7 @@
   function revealDone() {
     if (revealReported) return
     revealReported = true
+    settled = true
     onrevealed?.()
   }
 
@@ -157,6 +163,12 @@
 
   function mods(e: MouseEvent | KeyboardEvent): Modifiers {
     return { alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey, command: e.metaKey }
+  }
+  /** Pointer modifiers: a held-back bare Alt was not sent, so the peer must not see it either. */
+  function pointerMods(e: MouseEvent): Modifiers {
+    const m = mods(e)
+    if (altState.kind === 'pending') m.alt = false
+    return m
   }
 
   function toRemote(e: MouseEvent) {
@@ -200,19 +212,18 @@
     if (down) heldButtons.add(b)
     else if (!heldButtons.delete(b)) return // never told the peer it was down
     const p = toRemote(e) ?? lastPos
-    sendMouse(mouseMask(b, down ? MouseEvt.down : MouseEvt.up), p.x, p.y, mods(e))
+    sendMouse(mouseMask(b, down ? MouseEvt.down : MouseEvt.up), p.x, p.y, pointerMods(e))
   }
 
   function onPointerMove(e: PointerEvent) {
     if (!revealed) return
-    if (inDeadZone(e)) {
-      // Only reachable with pointer capture (a drag that started on the screen): let go of it
-      // there, so nothing over the pill is a drag on the remote.
-      releaseButtons()
-      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
-      return
-    }
-    if (nearTopEdge(e.clientY)) pill?.peek()
+    // A drag on the remote (a button held, or the canvas holding the pointer) goes on
+    // untouched up to the top edge and across the pill: no peek, no dead zone, so a title-bar
+    // drag or Aero Snap is never cut short. The pill area only counts on pointerdown.
+    const captured = canvas.hasPointerCapture(e.pointerId)
+    const held = heldButtons.size > 0
+    if (!held && !captured && inDeadZone(e)) return
+    if (shouldPeek({ y: e.clientY, held, captured })) pill?.peek()
     // A second button pressed/released while another is held arrives as a pointermove.
     if (e.button >= 0) {
       const bit = e.button === 1 ? 4 : e.button === 2 ? 2 : 1 << e.button
@@ -221,7 +232,7 @@
     const p = toRemote(e)
     if (!p) return
     lastPos = p
-    sendMouse(mouseMask(MouseButton.none, MouseEvt.move), p.x, p.y, mods(e))
+    sendMouse(mouseMask(MouseButton.none, MouseEvt.move), p.x, p.y, pointerMods(e))
   }
   function onPointerDown(e: PointerEvent) {
     e.preventDefault()
@@ -234,7 +245,9 @@
   }
   function onPointerUp(e: PointerEvent) {
     e.preventDefault()
-    if (!revealed || inDeadZone(e)) return
+    // No dead-zone check: a drag released over the pill still lets go on the remote (and
+    // sendButton drops ups for buttons the peer was never told about).
+    if (!revealed) return
     sendButton(domButton(e.button), false, e)
     if (e.buttons === 0 && canvas.hasPointerCapture(e.pointerId)) {
       canvas.releasePointerCapture(e.pointerId)
@@ -246,8 +259,8 @@
     alt({ type: 'interrupt' })
     const s = accumulateWheel(wheelAcc, e.deltaX, e.deltaY, e.deltaMode)
     const mask = mouseMask(MouseButton.none, MouseEvt.wheel)
-    for (let i = 0; i < Math.abs(s.x); i++) sendMouse(mask, Math.sign(s.x), 0, mods(e))
-    for (let i = 0; i < Math.abs(s.y); i++) sendMouse(mask, 0, Math.sign(s.y), mods(e))
+    for (let i = 0; i < Math.abs(s.x); i++) sendMouse(mask, Math.sign(s.x), 0, pointerMods(e))
+    for (let i = 0; i < Math.abs(s.y); i++) sendMouse(mask, 0, Math.sign(s.y), pointerMods(e))
   }
 
   // Bare Alt taps summon the pill and never reach the remote (sessionPill.ts altTapReducer).
@@ -419,7 +432,7 @@
   })
 </script>
 
-<div class="remote" class:revealed bind:this={root}>
+<div class="remote" class:revealed class:settled bind:this={root}>
   <!-- Not focusable until the reveal: hidden under the connecting screen it must not take
        Tab (reveal() focuses it programmatically). -->
   <canvas
@@ -443,7 +456,7 @@
     <DropZone {peerId} onactivity={() => pill?.peek()} />
   {/if}
 
-  {#if revealed && msg}
+  {#if revealed && msg && said}
     <div class="scrim" aria-hidden="true"></div>
     <div
       class="overlay"
@@ -451,12 +464,18 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="{uid}-title"
-      aria-describedby={msg.text ? `${uid}-text` : undefined}
+      aria-describedby={said.body ? `${uid}-text` : undefined}
       tabindex="-1"
       onkeydown={dialogKeydown}
     >
-      <h2 id="{uid}-title" class="t-lead">{msg.title}</h2>
-      {#if msg.text}<p id="{uid}-text" class="t-body muted">{msg.text}</p>{/if}
+      <h2 id="{uid}-title" class="t-lead">{said.title}</h2>
+      {#if said.body}<p id="{uid}-text" class="t-body muted">{said.body}</p>{/if}
+      {#if said.detail}
+        <details class="detail">
+          <summary>Detalhes</summary>
+          <code>{said.detail}</code>
+        </details>
+      {/if}
       {#if needsPassword}
         <form onsubmit={submitPassword}>
           <Field label="Senha" type="password" autocomplete="current-password" bind:value={retryPassword} />
@@ -483,6 +502,9 @@
   }
   .remote.revealed {
     clip-path: circle(150% at 50% 50%);
+  }
+  .remote.revealed.settled {
+    clip-path: none;
   }
   canvas {
     width: 100%;
@@ -531,6 +553,26 @@
     display: grid;
     gap: var(--space-4);
     width: 100%;
+    text-align: start;
+  }
+  .detail {
+    color: var(--text-muted);
+    font-size: var(--fs-body);
+    max-width: 100%;
+  }
+  .detail summary {
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .detail summary:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 3px;
+  }
+  .detail code {
+    display: block;
+    margin-top: var(--space-2);
+    font-family: var(--font-code);
+    overflow-wrap: anywhere;
     text-align: start;
   }
   .row {

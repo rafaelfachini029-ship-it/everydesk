@@ -7,6 +7,7 @@ import {
   SPARK_MS,
   arrived,
   cancellable,
+  humanizeLive,
   humanizeMsgbox,
   phaseFor,
   traceOptions,
@@ -181,4 +182,23 @@ test('second factor and restarting show a quiet label instead of staying silent'
 test('cancel applies before the reveal only', () => {
   for (const p of ['procurando', 'pedindo', 'aviso', 'conectando'] as const) assert.equal(cancellable(p), true, p)
   for (const p of ['pronto', 'erro', 'senha'] as const) assert.equal(cancellable(p), false, p)
+})
+
+test('messages over a live session read in Portuguese; raw text only as detail', () => {
+  const drop = humanizeLive({ kind: 'error', title: 'Connection Error', text: 'Connection timeout' })
+  assert.equal(drop.title, 'A conexão caiu.')
+  assert.equal(drop.detail, undefined)
+  assert.equal(
+    humanizeLive({ kind: 'error', title: 'Error', text: 'Closed manually by the peer' }).title,
+    'A outra máquina encerrou a conexão.',
+  )
+  const odd = humanizeLive({ kind: 'error', title: 'Error', text: 'Weird thing 0x42' })
+  assert.equal(odd.title, 'Não deu certo. Tente de novo.')
+  assert.equal(odd.detail, 'Weird thing 0x42')
+  const info = humanizeLive({ kind: 'info', title: 'Info', text: 'Something the engine says' })
+  assert.equal(info.title, 'Aviso da outra máquina.')
+  assert.equal(info.detail, 'Something the engine says')
+  assert.equal(humanizeLive({ kind: 're-input-password', title: 'Password', text: '' }).body, 'Essa senha não confere. Digite de novo.')
+  // English engine titles never surface as the title
+  assert.doesNotMatch(drop.title + odd.title + info.title, /Error|Info|Connection/)
 })
