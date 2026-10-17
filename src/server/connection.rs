@@ -250,11 +250,29 @@ mod ed_files {
         }
         if windows
             && (c.chars().any(|ch| ch.is_control() || "\\/:*?\"<>|".contains(ch))
-                || c.ends_with(['.', ' ']))
+                || c.ends_with(['.', ' '])
+                || is_reserved_device(c))
         {
             return false;
         }
         true
+    }
+
+    /// Windows device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`9`, `LPT1`-`9`), with or
+    /// without an extension (`NUL.txt`).
+    fn is_reserved_device(c: &str) -> bool {
+        let stem = c.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+        matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    }
+
+    /// Overwrite detection for an upload. A screen session always asks (an existing file needs
+    /// the `SendConfirm` round-trip), whatever version the controller claims; a file-transfer
+    /// login keeps the stock version check.
+    pub fn overwrite_detection(screen_session: bool, version_supports_it: bool) -> bool {
+        screen_session || version_supports_it
     }
 
     fn same(a: &str, b: &str) -> bool {
@@ -290,19 +308,19 @@ mod ed_files {
         }
     }
 
-    /// Where an upload lands: the receiving folder (`home`, `home/Desktop` or `home/Downloads`)
-    /// and the top-level item created in it, as host paths.
+    /// Where an upload lands: the receiving folder (`home/Desktop` or `home/Downloads`) and the
+    /// top-level item created in it, as host paths.
     #[derive(Debug, PartialEq)]
     pub struct UploadTarget {
         pub root: String,
         pub top: String,
-        pub at_home: bool,
     }
 
     /// Lexical confinement of an upload (or a `Create` of one of its folders): `path` plus each
-    /// relative `names` entry (folder uploads) must stay inside one of the three receiving
-    /// folders, with no `..`/`.`, absolute or drive/UNC names, Windows-invalid characters, and
-    /// no hidden (`.name`) item at the top level (`~/.ssh`, `~/.zshrc`).
+    /// relative `names` entry (folder uploads) must stay inside `home/Desktop` or
+    /// `home/Downloads` — never the home root itself (a `git.bat` / `python.exe` planted there
+    /// would run from a shell opened in home) — with no `..`/`.`, absolute or drive/UNC names,
+    /// Windows-invalid characters or device names, and no hidden (`.name`) top-level item.
     pub fn upload_target(
         home: &str,
         path: &str,
@@ -325,18 +343,17 @@ mod ed_files {
         }
         let sep = if windows { '\\' } else { '/' };
         let home_t = home.trim_end_matches(['/', '\\']);
-        let (root, top_i, at_home) = match rest.first() {
+        let root = match rest.first() {
             Some(first) if rest.len() >= 2 && ROOTS.iter().any(|r| same(r, first)) => {
-                (format!("{home_t}{sep}{first}"), 1, false)
+                format!("{home_t}{sep}{first}")
             }
-            Some(_) => (home_t.to_owned(), 0, true),
-            None => return None,
+            _ => return None,
         };
-        let top = rest[top_i];
+        let top = rest[1];
         if top.starts_with('.') {
             return None;
         }
-        Some(UploadTarget { top: format!("{root}{sep}{top}"), root, at_home })
+        Some(UploadTarget { top: format!("{root}{sep}{top}"), root })
     }
 
     /// What a screen session does with a `FileAction`: Ok = handle it, Err((job id, file num))
@@ -394,16 +411,12 @@ mod ed_files {
         }
     }
 
-    /// The filesystem half of the confinement: `path` resolves inside the receiving folder,
-    /// and at the home root the upload never writes into an existing folder (`Library`,
-    /// `AppData`...).
+    /// The filesystem half of the confinement: `path` resolves inside the receiving folder
+    /// (no symlink out of Desktop/Downloads).
     pub fn upload_fs_ok(t: &UploadTarget, path: &str) -> bool {
         let Ok(root) = Path::new(&t.root).canonicalize() else {
             return false;
         };
-        if t.at_home && Path::new(&t.top).is_dir() {
-            return false;
-        }
         resolve(Path::new(path)).map_or(false, |p| p.starts_with(&root) && p != root)
     }
 
@@ -4129,6 +4142,12 @@ impl Connection {
                                 let od = can_enable_overwrite_detection(get_version_number(
                                     &self.lr.version,
                                 ));
+                                // A screen session never trusts the claimed version to skip it.
+                                #[cfg(feature = "everydesk")]
+                                let od = ed_files::overwrite_detection(
+                                    self.file_transfer.is_none(),
+                                    od,
+                                );
                                 self.send_fs(ipc::FS::NewWrite {
                                     path: r.path.clone(),
                                     id: r.id,
@@ -8022,6 +8041,9 @@ mod test {
             ("read etc", rd("/etc"), false),
             ("read desktop child", rd("/Users/host/Desktop/x"), false),
             ("create in desktop", create("/Users/host/Desktop/folder/sub"), true),
+            ("create at home root", create("/Users/host/newdir"), false),
+            ("receive at home root", receive("/Users/host/git.bat"), false),
+            ("receive downloads", receive("/Users/host/Downloads/b.zip"), true),
             ("create outside", create("/tmp/x"), false),
             ("send generic", send(file_transfer_send_request::FileType::Generic), false),
             ("send printer", send(file_transfer_send_request::FileType::Printer), true),
@@ -8048,14 +8070,24 @@ mod test {
         assert!(ok("/Users/host", "/Users/host/Desktop/a.txt", &[], false));
         assert!(ok("/Users/host", "/Users/host/Downloads/x", &["y.txt"], false));
         assert!(ok("/Users/host", "/Users/host/Downloads/x", &["sub/y.txt"], false));
-        assert!(ok("/Users/host", "/Users/host/a.txt", &[], false));
         assert!(ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\a.txt", &[], true));
         assert!(ok("C:\\Users\\bob", "c:\\users\\BOB\\desktop\\a.txt", &[], true));
         let t = upload_target("/Users/host", "/Users/host/Desktop/x/y.txt", &[], false).unwrap();
         assert_eq!(t.root, "/Users/host/Desktop");
         assert_eq!(t.top, "/Users/host/Desktop/x");
-        assert!(!t.at_home);
-        assert!(upload_target("/Users/host", "/Users/host/n.txt", &[], false).unwrap().at_home);
+        // never the home root (Windows planting: git.bat / python.exe next to a shell's cwd)
+        assert!(!ok("/Users/host", "/Users/host/n.txt", &[], false));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\git.bat", &[], true));
+        assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\python.exe", &[], true));
+        assert!(!ok("/Users/host", "/Users/host/Desktop", &[], false));
+        assert!(!ok("/Users/host", "/Users/host/Library/LaunchAgents/x.plist", &[], false));
+        // Windows device names, with or without extension, anywhere below home
+        for n in ["CON", "nul.txt", "Aux", "PRN.log", "COM1", "lpt9.dat", "com3 .txt"] {
+            assert!(!ok("C:\\Users\\bob", &format!("C:\\Users\\bob\\Desktop\\{n}"), &[], true), "{n}");
+            assert!(!ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\x", &[&format!("a\\{n}")], true), "{n}");
+        }
+        assert!(ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\COM10.txt", &[], true));
+        assert!(ok("C:\\Users\\bob", "C:\\Users\\bob\\Desktop\\console.txt", &[], true));
         // refused
         assert!(!ok("/Users/host", "/Users/host/../etc/passwd", &[], false));
         assert!(!ok("/Users/host", "/etc/x", &[], false));
@@ -8085,21 +8117,32 @@ mod test {
         let base = std::env::temp_dir().join(format!("ed-up-{}", std::process::id()));
         let home = base.join("home");
         std::fs::create_dir_all(home.join("Desktop")).unwrap();
-        std::fs::create_dir_all(home.join("Library")).unwrap();
         let h = home.to_string_lossy().into_owned();
         let check = |p: &str| {
             let p = format!("{h}/{p}");
             upload_target(&h, &p, &[], false).map_or(false, |t| upload_fs_ok(&t, &p))
         };
         assert!(check("Desktop/a.txt"));
-        assert!(check("n.txt"));
-        assert!(!check("Library/LaunchAgents/x.plist"));
+        assert!(!check("n.txt"));
+        assert!(!check("Downloads/x.txt")); // folder missing: canonicalize fails, refused
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/etc", home.join("Desktop/link")).unwrap();
             assert!(!check("Desktop/link/x"));
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn screen_session_forces_overwrite_detection() {
+        use super::ed_files::overwrite_detection;
+        // screen session: on even when the claimed version would turn it off
+        assert!(overwrite_detection(true, false));
+        assert!(overwrite_detection(true, true));
+        // file-transfer login: stock version check
+        assert!(!overwrite_detection(false, false));
+        assert!(overwrite_detection(false, true));
     }
 
     #[cfg(feature = "everydesk")]
