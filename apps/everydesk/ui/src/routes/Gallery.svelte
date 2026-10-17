@@ -7,11 +7,7 @@
   import '../design/typography.css'
   import { onDestroy } from 'svelte'
   import ArrowRight from 'lucide-svelte/icons/arrow-right'
-  import Folder from 'lucide-svelte/icons/folder'
-  import CircleDot from 'lucide-svelte/icons/circle-dot'
   import Monitor from 'lucide-svelte/icons/monitor'
-  import MessagesSquare from 'lucide-svelte/icons/messages-square'
-  import Gauge from 'lucide-svelte/icons/gauge'
   import PhoneOff from 'lucide-svelte/icons/phone-off'
   import Mic from 'lucide-svelte/icons/mic'
   import Settings from 'lucide-svelte/icons/settings'
@@ -49,6 +45,8 @@
 
   // moment 4: request cards (fixtures)
   let keep = $state({ on: true, policy: 'ask', replaceKey: false })
+  // key changed, "lembrar" ticked by the owner: the second confirmation (replace key) shows
+  let swap = $state({ on: true, policy: 'ask', replaceKey: false })
   const ringNow = 1_000_000
 
   let destination = $state('')
@@ -82,8 +80,9 @@
 
         <div class="block">
           <Field
+            lead
             label="Para onde você quer ir?"
-            placeholder="Código ou nome do contato"
+            placeholder="código ou contato"
             hint="O código aparece na tela da outra pessoa."
             bind:value={destination}
           />
@@ -119,12 +118,8 @@
               <span>Notebook da Ana</span>
               <Icon icon={Mic} label="Voz ligada" />
             {/snippet}
-            <Button icon={Folder} label="Arquivos" />
-            <Button icon={CircleDot} label="Gravar" />
             <Button icon={Monitor} label="Monitores" />
-            <Button icon={MessagesSquare} label="Conversa" />
-            <Button icon={Gauge} label="Qualidade" />
-            <Button variant="danger" icon={PhoneOff} label="Encerrar" />
+            <Button variant="danger" icon={PhoneOff}>Encerrar</Button>
           </Pill>
           {/snippet}
           {@render sessionPill(false)}
@@ -133,7 +128,10 @@
         </div>
 
         <div class="block cards">
-          <p class="t-body muted">Momento 4: pedido de acesso e reconfirmação.</p>
+          <p class="t-body muted">
+            Momento 4: pedido verificado, não verificado, chave que não confere (padrão
+            "Recusar"), chave trocada com a segunda confirmação, e reconfirmação.
+          </p>
           <AccessCard
             name="Marta Souza"
             code="lua-azul-sete"
@@ -151,8 +149,8 @@
           <AccessCard
             name="Notebook da Ana"
             code="sol-verde-dois"
-            remaining={17}
-            identity={{ conn_id: 2, state: 'unverified', known: true }}
+            remaining={41}
+            identity={{ conn_id: 2, state: 'unverified', known: false }}
             rememberable={false}
             keyChanged={false}
             onremember={() => {}}
@@ -161,8 +159,35 @@
             onaccept={() => {}}
             ondeny={() => {}}
           />
+          <AccessCard
+            name="Recepção"
+            code="rio-coruja-21"
+            remaining={17}
+            identity={{ conn_id: 3, state: 'unverified', known: true }}
+            rememberable={false}
+            keyChanged={false}
+            onremember={() => {}}
+            onpolicy={() => {}}
+            onreplacekey={() => {}}
+            onaccept={() => {}}
+            ondeny={() => {}}
+          />
+          <AccessCard
+            name="Escritório"
+            code="verde-onca-13"
+            remaining={52}
+            identity={{ conn_id: 4, state: 'key_changed', known: true }}
+            rememberable={true}
+            keyChanged={true}
+            remember={swap}
+            onremember={(on) => (swap = { ...swap, on, replaceKey: false })}
+            onpolicy={(policy) => (swap = { ...swap, policy })}
+            onreplacekey={(replaceKey) => (swap = { ...swap, replaceKey })}
+            onaccept={() => {}}
+            ondeny={() => {}}
+          />
           <ReconfirmCard
-            name="Marta Souza"
+            name="Mãe"
             start={ringNow - 36_000}
             ringSecs={60}
             now={ringNow}

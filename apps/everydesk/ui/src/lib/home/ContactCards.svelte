@@ -42,6 +42,18 @@
     confirming = false
   }
 
+  /** Escape closes the "…" menu and puts the focus back on its "…" button. Handled here,
+   *  before Home's Escape (which folds the cards away), and marked as used. */
+  function escape(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || !open || e.defaultPrevented) return
+    e.preventDefault()
+    const peer = open
+    const hadFocus = !!listEl?.querySelector(`[data-peer="${CSS.escape(peer)}"]`)?.contains(document.activeElement)
+    close()
+    if (hadFocus || document.activeElement === document.body)
+      listEl?.querySelector<HTMLButtonElement>(`[data-peer="${CSS.escape(peer)}"] .more`)?.focus()
+  }
+
   function onwindowdown(e: PointerEvent) {
     if (open && !(e.target as Element).closest?.(`[data-peer="${CSS.escape(open)}"]`)) close()
   }
@@ -57,10 +69,10 @@
   }
 </script>
 
-<svelte:window onpointerdown={onwindowdown} onkeydown={(e) => e.key === 'Escape' && open && close()} />
+<svelte:window onpointerdown={onwindowdown} onkeydown={escape} />
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<ul class="cards" bind:this={listEl} aria-label="Contatos" onkeydown={keynav}>
+<ul class="cards" bind:this={listEl} aria-label="Contatos" onkeydown={(e) => (escape(e), keynav(e))}>
   {#each contacts as c (c.peer_id)}
     <li class="card" class:raised={open === c.peer_id} data-peer={c.peer_id}>
       <button class="card-go" onclick={() => onconnect(c.peer_id)} aria-label="Conectar a {c.name || c.peer_id}{c.online ? ', online' : ''}">

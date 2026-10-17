@@ -1,6 +1,8 @@
 <!--
   SettingsPanel — the single quiet corner button and what sits behind it. For now only the
-  theme; the rest of the settings arrive in later tasks.
+  theme; the rest of the settings arrive in later tasks. A disclosure: the gear says whether
+  it is open (aria-expanded/aria-controls); Escape or "Fechar" closes it and puts the focus
+  back on the gear.
 -->
 <script lang="ts">
   import Settings from 'lucide-svelte/icons/settings'
@@ -11,6 +13,7 @@
   let open = $state(false)
   let theme = $state<Theme>(document.documentElement.dataset.theme === 'light' ? 'light' : storedTheme())
   let root: HTMLElement | undefined = $state()
+  const panelId = 'settings-panel'
 
   function choose(t: Theme) {
     theme = t
@@ -20,17 +23,36 @@
   function onwindowdown(e: PointerEvent) {
     if (open && root && !root.contains(e.target as Node)) open = false
   }
+
+  /** Close and hand the keyboard back to the gear. */
+  function closeToGear() {
+    open = false
+    root?.querySelector<HTMLButtonElement>('.gear')?.focus()
+  }
+
+  function onwindowkey(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || !open) return
+    e.preventDefault()
+    closeToGear()
+  }
 </script>
 
-<svelte:window onpointerdown={onwindowdown} onkeydown={(e) => e.key === 'Escape' && (open = false)} />
+<svelte:window onpointerdown={onwindowdown} onkeydown={onwindowkey} />
 
 <div class="settings" bind:this={root}>
-  <Button icon={Settings} label="Configurações" onclick={() => (open = !open)} />
+  <Button
+    class="gear"
+    icon={Settings}
+    label="Configurações"
+    aria-expanded={open}
+    aria-controls={panelId}
+    onclick={() => (open = !open)}
+  />
   {#if open}
-    <div class="panel" role="dialog" aria-label="Configurações">
+    <div class="panel" id={panelId} role="group" aria-labelledby="{panelId}-title">
       <header>
-        <h2>Configurações</h2>
-        <Button icon={X} label="Fechar" onclick={() => (open = false)} />
+        <h2 id="{panelId}-title">Configurações</h2>
+        <Button icon={X} label="Fechar" onclick={closeToGear} />
       </header>
       <div class="opt">
         <span id="theme-label">Aparência</span>
@@ -95,7 +117,7 @@
   .opt {
     display: grid;
     gap: var(--space-2);
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
     color: var(--text-muted);
   }
   .switch {

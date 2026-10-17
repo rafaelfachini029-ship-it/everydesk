@@ -2,9 +2,12 @@
   Field — large single-line input with a label above and an optional hint below.
   Props:
     label: string (always visible; never placeholder-only)
+    lead?: boolean — the label is the question of the screen ("Para onde você quer ir?"):
+      lead size, centred, full text colour
     value?: string (bindable)
     hint?: string — helper text, announced with the input
-    error?: string — replaces the hint, marks the input invalid
+    error?: string — replaces the hint, marks the input invalid (aria-invalid) and is said by a
+      polite live region that is always mounted, so it is announced when it appears
     placeholder?: string
     id?: string (auto-generated when absent)
     type?: 'text' | 'search' | 'password' = 'text'
@@ -17,6 +20,7 @@
 
   interface Props {
     label: string
+    lead?: boolean
     value?: string
     hint?: string
     error?: string
@@ -30,6 +34,7 @@
   const uid = $props.id()
   let {
     label,
+    lead = false,
     value = $bindable(''),
     hint,
     error,
@@ -44,8 +49,8 @@
   const note = $derived(error || hint)
 </script>
 
-<div class="field" class:invalid={!!error}>
-  <label class="t-label" for={id}>{label}</label>
+<div class="field" class:invalid={!!error} class:lead>
+  <label class={lead ? 't-lead' : 't-label'} for={id}>{label}</label>
   <!-- svelte-ignore a11y_autofocus -->
   <input
     {id}
@@ -59,16 +64,21 @@
     aria-describedby={note ? `${id}-note` : undefined}
     bind:value
   />
-  {#if note}<p id="{id}-note" class="note">{note}</p>{/if}
+  <p id="{id}-note" class="note" aria-live="polite">{note ?? ''}</p>
 </div>
 
 <style>
   .field {
     display: grid;
-    gap: var(--space-2);
   }
   label {
+    margin-bottom: var(--space-2);
     color: var(--text);
+  }
+  .lead label {
+    justify-self: center;
+    margin-bottom: var(--space-4);
+    text-align: center;
   }
   input {
     min-height: 64px;
@@ -97,10 +107,14 @@
     border-color: var(--ring);
   }
   .note {
-    margin: 0;
+    margin: var(--space-2) 0 0;
     color: var(--text-muted);
     font-size: var(--fs-body);
     line-height: var(--lh-body);
+  }
+  /* empty but mounted: the live region exists before the first error */
+  .note:empty {
+    margin: 0;
   }
   .invalid input {
     border-color: var(--danger);

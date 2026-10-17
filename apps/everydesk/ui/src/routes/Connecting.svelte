@@ -1,9 +1,10 @@
 <!--
   Connecting (spec 6.2, moment 2): your card, the other machine's card, and a trace of light
   between them. How far the light reaches says where things are (searching → it touched the
-  other card → its dot lights up when the session opens); a spark travels the lit part
-  instead of a spinner. Under "reduzir movimento" the reach jumps and the spark is gone; the
-  label and the dot still change, so no state is lost.
+  other card → its dot lights up when the session opens). On each change a spark runs the
+  lit part once, then the trace stands still: nothing loops, so it never reads as a spinner.
+  Under "reduzir movimento" the reach jumps and the spark is gone; the label and the dot still
+  change, so no state is lost.
   Props:
     target: string — the code being reached (already normalized)
     phase: Phase — from phaseFor(events)
@@ -73,8 +74,8 @@
     reachAnim = animate(lit, [{ strokeDashoffset: 100 - from * 100 }, { strokeDashoffset: 100 - to * 100 }], traceOptions().reach)
   })
 
-  // Spark: a short bright dash travelling the lit part, looping while waiting. Not drawn at
-  // all under reduced motion (a looping cue would turn into a static dot with no meaning).
+  // Spark: a short bright dash that runs the lit part once whenever the reach changes (the
+  // light travels to where the attempt got), then stops. Not drawn under reduced motion.
   const reduced = prefersReducedMotion()
   $effect(() => {
     if (!spark || reduced || failed) return
@@ -237,7 +238,7 @@
   }
   .code {
     font-family: var(--font-code);
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
     color: var(--text-muted);
     letter-spacing: var(--track-label);
     overflow-wrap: anywhere;
@@ -248,17 +249,29 @@
     color: var(--text);
     letter-spacing: 0;
   }
-  /* Not found yet: the destination waits half-lit. Opacity, not colour, so it reads in
-     both themes and without motion. */
+  /* Not found yet: the destination waits unlit. Only the frame recedes (dashed, no fill)
+     and the name takes the muted tone, which still passes AA; no opacity on the text, so it
+     stays readable in both themes and without motion. */
   .dest {
-    opacity: 0.55;
+    background: transparent;
+    border-style: dashed;
+    border-color: var(--line-strong);
     transition:
-      opacity var(--dur-slow) var(--ease-out),
+      background-color var(--dur-slow) var(--ease-out),
       border-color var(--dur-slow) var(--ease-out);
   }
+  .dest .who,
+  .dest .code.solo {
+    color: var(--text-muted);
+    transition: color var(--dur-slow) var(--ease-out);
+  }
   .dest.found {
-    opacity: 1;
-    border-color: var(--line-strong);
+    background: var(--surface);
+    border-style: solid;
+  }
+  .dest.found .who,
+  .dest.found .code.solo {
+    color: var(--text);
   }
   /* The destination's dot: hollow until the session opens, then the pulse fills it. */
   .dot {
@@ -375,7 +388,7 @@
   }
   .detail {
     color: var(--text-muted);
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
   }
   .detail summary {
     cursor: pointer;

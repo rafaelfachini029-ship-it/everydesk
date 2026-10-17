@@ -24,7 +24,8 @@
   --font-ui: 'Geist', system-ui, sans-serif;
   --font-code: 'Geist Mono', ui-monospace, monospace;
 
-  --fs-display: clamp(3.5rem, 9vw, 7.5rem); /* the machine code, like a plate */
+  /* the machine code, like a plate; grows with the window up to 200px (~2560 wide) */
+  --fs-display: clamp(3.5rem, 7.8125vw, 12.5rem);
   --fs-title: 2rem; /* 32 */
   --fs-lead: 1.375rem; /* 22: field input, card names */
   --fs-body: 1.0625rem; /* 17 */

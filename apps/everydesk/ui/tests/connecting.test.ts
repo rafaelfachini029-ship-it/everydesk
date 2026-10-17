@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   REACH,
+  SPARK_MS,
   arrived,
   cancellable,
   humanizeMsgbox,
@@ -121,14 +122,15 @@ test('the trace reaches the other card once it answers; its dot lights only when
   assert.equal(arrived('conectando'), true)
 })
 
-test('reduced motion: the trace jumps (duration 0), no travelling spark loop', () => {
+test('the spark never loops: one pass per phase change, then the trace stands still', () => {
   const reduced = traceOptions(true)
   assert.equal(reduced.reach.duration, 0)
   assert.equal(reduced.spark.duration, 0)
   assert.equal(reduced.spark.iterations, 1)
   const full = traceOptions(false)
   assert.ok((full.reach.duration as number) > 0)
-  assert.equal(full.spark.iterations, Infinity)
+  assert.equal(full.spark.iterations, 1)
+  assert.ok((full.spark.duration as number) > 0 && (full.spark.duration as number) <= SPARK_MS)
 })
 
 test('the same engine text, read by phase', () => {

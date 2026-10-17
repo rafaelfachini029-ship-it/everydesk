@@ -55,6 +55,7 @@
 
 <div class="go">
   <Field
+    lead
     label="Para onde você quer ir?"
     placeholder={contacts.length ? 'código ou contato' : 'código da outra máquina'}
     bind:value={query}
@@ -67,15 +68,33 @@
 </div>
 
 <style>
+  /* The Field's parts join this grid (display: contents) so the question spans the field and
+     the button and sits centred over both, and the button lines up with the input row. */
   .go {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     column-gap: var(--space-3);
     width: 100%;
   }
-  /* sits level with the 64px input: below the label line, centred on the input */
+  .go :global(.field) {
+    display: contents;
+  }
+  .go :global(.field > label) {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+  .go :global(.field > input) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .go :global(.field > .note) {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
   .action {
-    padding-top: calc(var(--fs-label) * var(--lh-snug) + var(--space-2) + 2px);
+    grid-column: 2;
+    grid-row: 2;
+    display: flex;
   }
   .action :global(.btn) {
     flex-direction: row-reverse;
@@ -85,8 +104,12 @@
       grid-template-columns: 1fr;
       row-gap: var(--space-3);
     }
+    .go :global(.field > .note) {
+      grid-row: 3;
+    }
     .action {
-      padding-top: 0;
+      grid-column: 1;
+      grid-row: 4;
     }
     .action :global(.btn) {
       width: 100%;

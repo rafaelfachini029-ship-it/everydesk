@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { CODE_MAX_PX, CODE_MIN_PX, codeFontSize, codeParts, serverStatus } from '../src/lib/home/bigcode.ts'
+import { CODE_CAP_PX, CODE_MAX_PX, CODE_MIN_PX, codeFontSize, codeParts, goWidth, serverStatus } from '../src/lib/home/bigcode.ts'
 
 test('small window: code fits the width', () => {
   const px = codeFontSize(600, 400, 13)
@@ -9,8 +9,21 @@ test('small window: code fits the width', () => {
   assert.ok(px * 13 * 0.62 <= 600 - 64)
 })
 
-test('huge window: capped at the maximum', () => {
-  assert.equal(codeFontSize(2560, 1440, 13), CODE_MAX_PX)
+test('huge window: the plate grows with it, up to the cap (~200px at 2560)', () => {
+  assert.equal(codeFontSize(2560, 1440, 13), CODE_CAP_PX)
+  assert.equal(codeFontSize(4000, 2200, 13), CODE_CAP_PX)
+  const mid = codeFontSize(1920, 1080, 13)
+  assert.ok(mid > CODE_MAX_PX && mid < CODE_CAP_PX, `${mid}`)
+})
+
+test('the field follows the code: 640px at least, the code width on big screens', () => {
+  assert.equal(goWidth(900, 400), 640) // the code is narrower: the field keeps 640
+  const w1280 = goWidth(1280, 800)
+  assert.ok(w1280 > 640 && w1280 < 1280 - 64, `${w1280}`) // as wide as the plate
+  const huge = goWidth(2560, 1440)
+  assert.ok(huge > 1400 && huge <= 2560 - 64, `${huge}`)
+  // a narrow window: never wider than the room
+  assert.equal(goWidth(600, 800, 13, 536), 536)
 })
 
 test('tiny window: never below the minimum', () => {

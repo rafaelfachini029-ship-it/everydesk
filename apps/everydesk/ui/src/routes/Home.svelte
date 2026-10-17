@@ -14,6 +14,7 @@
   import GoField from '../lib/home/GoField.svelte'
   import SettingsPanel from '../lib/home/SettingsPanel.svelte'
   import { ContactBook } from '../lib/home/contacts.svelte.ts'
+  import { goWidthCss } from '../lib/home/bigcode.ts'
   import { suggest } from '../lib/home/go.ts'
   import { shouldCollapse } from '../lib/home/reveal.ts'
 
@@ -29,7 +30,13 @@
 
   const book = new ContactBook()
   const shown = $derived(query.trim() ? suggest(book.list, query) : book.list)
-  const revealed = $derived((focused || scrolled || !!query.trim()) && shown.length > 0)
+  /** Escape folded the cards away; the next click, focus or keystroke in the field opens them. */
+  let dismissed = $state(false)
+  const revealed = $derived(!dismissed && (focused || scrolled || !!query.trim()) && shown.length > 0)
+  $effect(() => {
+    void query
+    dismissed = false
+  })
 
   async function refresh() {
     try {
@@ -66,12 +73,30 @@
 
   function windowdown(e: PointerEvent) {
     pointerInside = !!goEl?.contains(e.target as Node)
-    if (pointerInside) focused = true
-    else requestAnimationFrame(collapseUnlessHeld)
+    if (pointerInside) {
+      focused = true
+      dismissed = false
+    } else requestAnimationFrame(collapseUnlessHeld)
   }
 
   function windowup() {
-    if (pointerInside) setTimeout(() => (pointerInside = false))
+    if (!pointerInside) return
+    // After the click has landed: the press no longer holds the cards open, so check again
+    // (a click on a card that did not keep the focus must still let them fold).
+    setTimeout(() => {
+      pointerInside = false
+      collapseUnlessHeld()
+    })
+  }
+
+  /** Escape folds the cards away (an open "…" menu closes first, in ContactCards). */
+  function gokeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || e.defaultPrevented || !revealed) return
+    e.preventDefault()
+    // the cards go inert: keep the focus in the field
+    if (goEl?.querySelector('.cards')?.contains(document.activeElement)) goEl.querySelector<HTMLInputElement>('input')?.focus()
+    dismissed = true
+    scrolled = false
   }
 
   function wheel(e: WheelEvent) {
@@ -85,7 +110,8 @@
   <SettingsPanel />
   <div class="stage">
     <BigCode code={myId} {status} />
-    <div class="go" bind:this={goEl} onfocusin={() => (focused = true)} onfocusout={focusout}>
+    <!-- svelte-ignore a11y_no_static_element_interactions (Escape bubbling from the field/cards) -->
+    <div class="go" style:width={goWidthCss(myId.length)} bind:this={goEl} onfocusin={() => (focused = true)} onfocusout={focusout} onkeydown={gokeydown}>
       <GoField contacts={book.list} bind:query bind:error {onconnect} onarrowdown={() => cards?.focusFirst()} />
       <div class="unfold" class:open={revealed} inert={!revealed}>
         <div class="inner">
@@ -116,6 +142,7 @@
     padding: clamp(var(--space-5), 8vh, var(--space-9)) var(--space-6);
     box-sizing: border-box;
   }
+  /* width: the code's own width (min 640px), set inline from bigcode.ts goWidthCss */
   .go {
     width: min(100%, 640px);
   }

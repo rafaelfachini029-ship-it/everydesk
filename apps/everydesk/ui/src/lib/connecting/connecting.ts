@@ -153,12 +153,14 @@ export const REACH: Record<Exclude<PhaseName, 'erro'>, number> = {
 /** The destination's dot lights up only once the session is actually opening. */
 export const arrived = (p: PhaseName) => p === 'conectando' || p === 'pronto'
 
-/** One pass of the spark along the lit part (a liveness cue in place of a spinner). */
+/** The spark's single pass along the lit part, played when the reach changes (the light
+ *  travels to where the attempt got, then the trace stands still). Never looped: a
+ *  repeating cue is a spinner (spec §6.2). */
 export const SPARK_MS = 1400
 
 export function traceOptions(reduced?: boolean) {
   return {
     reach: motionOptions({ duration: DUR.slow, easing: EASE.out }, reduced),
-    spark: motionOptions({ duration: SPARK_MS, easing: 'cubic-bezier(0.4, 0, 0.2, 1)', iterations: Infinity, fill: 'none' }, reduced),
+    spark: motionOptions({ duration: SPARK_MS, easing: 'cubic-bezier(0.4, 0, 0.2, 1)', iterations: 1, fill: 'none' }, reduced),
   }
 }

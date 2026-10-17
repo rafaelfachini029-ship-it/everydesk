@@ -7,20 +7,18 @@
     status: string — raw `get_server_status` text
 -->
 <script lang="ts">
-  import { CODE_GLYPH_EM, CODE_GUTTERS_PX, CODE_HEIGHT_SHARE, CODE_MAX_PX, CODE_MIN_PX, codeParts, serverStatus } from './bigcode.ts'
+  import { codeFontCss, codeParts, serverStatus } from './bigcode.ts'
 
   let { code, status }: { code: string; status: string } = $props()
 
   const parts = $derived(codeParts(code))
   const st = $derived(serverStatus(status))
   // Same formula as codeFontSize(); CSS does the live resizing.
-  const size = $derived(
-    `clamp(${CODE_MIN_PX}px, min((100vw - ${CODE_GUTTERS_PX}px) / ${Math.max(code.length || 13, 1) * CODE_GLYPH_EM}, ${CODE_HEIGHT_SHARE * 100}vh), ${CODE_MAX_PX}px)`,
-  )
+  const size = $derived(codeFontCss(code.length))
 </script>
 
 <section class="plate" aria-labelledby="my-code-label">
-  <p id="my-code-label" class="eyebrow t-body">Seu código</p>
+  <h1 id="my-code-label" class="eyebrow t-body">Seu código</h1>
   <div class="lit">
     <span class="glow" aria-hidden="true"></span>
     {#if parts.length}
@@ -47,6 +45,7 @@
   .eyebrow {
     margin: 0;
     color: var(--text-muted);
+    font-weight: 400;
   }
   .lit {
     position: relative;
@@ -98,7 +97,6 @@
   /* the dashes recede so the words read like a plate */
   .sep {
     color: var(--text-muted);
-    opacity: 0.55;
     font-weight: 300;
   }
   .loading {
