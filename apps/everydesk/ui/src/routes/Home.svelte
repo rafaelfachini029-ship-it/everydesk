@@ -15,6 +15,7 @@
   import SettingsPanel from '../lib/home/SettingsPanel.svelte'
   import { ContactBook } from '../lib/home/contacts.svelte.ts'
   import { suggest } from '../lib/home/go.ts'
+  import { shouldCollapse } from '../lib/home/reveal.ts'
 
   let { onconnect, error = $bindable('') }: { onconnect: (peerId: string) => void; error?: string } = $props()
 
@@ -50,14 +51,35 @@
     }
   })
 
-  function focusout(e: FocusEvent) {
-    if (!goEl?.contains(e.relatedTarget as Node | null)) focused = false
+  // Pointer pressed inside the field/cards area; cleared after the click has landed.
+  let pointerInside = false
+
+  function collapseUnlessHeld() {
+    if (!goEl) return
+    if (shouldCollapse({ focusWithin: goEl.matches(':focus-within'), pointerInside })) focused = false
+  }
+
+  function focusout() {
+    // relatedTarget is unreliable (null on WKWebView button clicks): re-check next frame.
+    requestAnimationFrame(collapseUnlessHeld)
+  }
+
+  function windowdown(e: PointerEvent) {
+    pointerInside = !!goEl?.contains(e.target as Node)
+    if (pointerInside) focused = true
+    else requestAnimationFrame(collapseUnlessHeld)
+  }
+
+  function windowup() {
+    if (pointerInside) setTimeout(() => (pointerInside = false))
   }
 
   function wheel(e: WheelEvent) {
     if (e.deltaY > 0) scrolled = true
   }
 </script>
+
+<svelte:window onpointerdown={windowdown} onpointerup={windowup} onpointercancel={windowup} />
 
 <main class="home" onwheel={wheel}>
   <SettingsPanel />
@@ -73,10 +95,10 @@
             {onconnect}
             onpolicy={(c, key) => book.setPolicy(c, key)}
             onforget={(c) => book.remove(c)}
-            error={book.error}
           />
         </div>
       </div>
+      {#if book.error}<p class="book-error" role="alert">{book.error}</p>{/if}
     </div>
   </div>
 </main>
@@ -109,6 +131,11 @@
   .unfold.open {
     grid-template-rows: 1fr;
     opacity: 1;
+  }
+  .book-error {
+    margin: var(--space-4) 0 0;
+    color: var(--danger);
+    font-size: var(--fs-body);
   }
   .inner {
     min-height: 0;

@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { applyPresence, policyFromKey, type Contact, type Presence } from '../policy.ts'
 
+export const LOAD_ERROR = 'Não consegui carregar os contatos.'
+
 export class ContactBook {
   list = $state<Contact[]>([])
   error = $state('')
@@ -12,8 +14,10 @@ export class ContactBook {
   async load() {
     try {
       this.list = await invoke<Contact[]>('contacts_list')
+      if (this.error === LOAD_ERROR) this.error = ''
     } catch (e) {
-      this.error = `${e}`
+      console.error('contacts_list', e)
+      this.error = LOAD_ERROR
     }
   }
 
@@ -21,8 +25,9 @@ export class ContactBook {
     this.error = ''
     try {
       await invoke('contacts_set_policy', { peerId: c.peer_id, policy: policyFromKey(key) })
-    } catch {
-      this.error = 'Não deu para mudar como este contato entra. Tente de novo.'
+    } catch (e) {
+      console.error('contacts_set_policy', e)
+      this.error = 'Não consegui mudar como este contato entra. Tente de novo.'
     }
     await this.load()
   }
@@ -31,8 +36,9 @@ export class ContactBook {
     this.error = ''
     try {
       await invoke('contacts_remove', { peerId: c.peer_id })
-    } catch {
-      this.error = `Não deu para esquecer ${c.name || c.peer_id}. Tente de novo.`
+    } catch (e) {
+      console.error('contacts_remove', e)
+      this.error = `Não consegui esquecer ${c.name || c.peer_id}. Tente de novo.`
     }
     await this.load()
   }

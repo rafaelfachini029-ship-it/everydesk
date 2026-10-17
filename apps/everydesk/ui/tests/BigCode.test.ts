@@ -41,3 +41,9 @@ test('server status in plain words', () => {
   assert.deepEqual(serverStatus('conectando'), { label: 'conectando…', online: false })
   assert.deepEqual(serverStatus('erro: x'), { label: 'sem conexão', online: false })
 })
+
+test('1440 wide: capped, reads as a plate (under 75% of the width)', () => {
+  const px = codeFontSize(1440, 900, 13)
+  assert.equal(px, CODE_MAX_PX)
+  assert.ok(px * 13 * 0.62 < 1440 * 0.75)
+})

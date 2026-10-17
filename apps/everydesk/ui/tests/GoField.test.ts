@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { fold, humanError, resolveTarget, suggest } from '../src/lib/home/go.ts'
 import { normalizeCode } from '../src/lib/session.ts'
 import type { Contact } from '../src/lib/policy.ts'
+import { shouldCollapse } from '../src/lib/home/reveal.ts'
 
 const c = (peer_id: string, name: string, online = false): Contact => ({
   peer_id,
@@ -82,4 +83,12 @@ test('errors read as plain Portuguese', () => {
   assert.match(humanError('Connection timeout'), /não respondeu/)
   assert.match(humanError('Wrong Password'), /senha/i)
   assert.match(humanError('something weird 0x42'), /Não foi possível conectar/)
+})
+
+test('cards stay open while focus or a pointer press is inside', () => {
+  assert.equal(shouldCollapse({ focusWithin: true, pointerInside: false }), false)
+  // WKWebView: clicking a card button blurs the field without focusing the button
+  assert.equal(shouldCollapse({ focusWithin: false, pointerInside: true }), false)
+  assert.equal(shouldCollapse({ focusWithin: true, pointerInside: true }), false)
+  assert.equal(shouldCollapse({ focusWithin: false, pointerInside: false }), true)
 })

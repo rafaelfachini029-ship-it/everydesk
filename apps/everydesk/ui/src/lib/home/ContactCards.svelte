@@ -7,7 +7,6 @@
     onconnect: (peerId: string) => void
     onpolicy: (c: Contact, key: string) => void
     onforget: (c: Contact) => void
-    error?: string
   Export: focusFirst() — moves keyboard focus to the first card.
 -->
 <script lang="ts">
@@ -22,9 +21,8 @@
     onconnect: (peerId: string) => void
     onpolicy: (c: Contact, key: string) => void
     onforget: (c: Contact) => void
-    error?: string
   }
-  let { contacts, onconnect, onpolicy, onforget, error = '' }: Props = $props()
+  let { contacts, onconnect, onpolicy, onforget }: Props = $props()
 
   let open = $state<string | null>(null)
   let confirming = $state(false)
@@ -102,12 +100,11 @@
     </li>
   {/each}
 </ul>
-{#if error}<p class="error" role="alert">{error}</p>{/if}
 
 <style>
   .cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: var(--space-3);
     margin: 0;
     padding: 0;
@@ -166,7 +163,7 @@
     overflow: hidden;
     color: var(--text-muted);
     font-family: var(--font-code);
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -227,7 +224,7 @@
   }
   .cap {
     color: var(--text-muted);
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
   }
   .ask {
     margin: 0;
@@ -238,10 +235,5 @@
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-2);
-  }
-  .error {
-    margin: var(--space-3) 0 0;
-    color: var(--danger);
-    font-size: var(--fs-body);
   }
 </style>

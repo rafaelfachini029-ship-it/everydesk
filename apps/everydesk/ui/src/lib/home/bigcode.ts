@@ -1,7 +1,8 @@
 // Pure helpers behind BigCode.svelte (tested in tests/BigCode.test.ts).
 
 export const CODE_MIN_PX = 32
-export const CODE_MAX_PX = 168
+/** About 128px: at 1440 wide the code reads as a plate (~72% width), not edge to edge. */
+export const CODE_MAX_PX = 128
 /** Horizontal page gutters (2 × 32px) the code must stay inside. */
 export const CODE_GUTTERS_PX = 64
 /** Geist Mono advance (0.6em) plus a little slack for the -0.03em tracking and rounding. */

@@ -20,7 +20,7 @@
 </script>
 
 <section class="plate" aria-labelledby="my-code-label">
-  <p id="my-code-label" class="eyebrow t-label">Seu código</p>
+  <p id="my-code-label" class="eyebrow t-body">Seu código</p>
   <div class="lit">
     <span class="glow" aria-hidden="true"></span>
     {#if parts.length}
