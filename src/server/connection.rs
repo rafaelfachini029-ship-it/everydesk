@@ -205,6 +205,14 @@ async fn click_approve_deadline(authorized: bool, prompted: Option<Instant>) {
     std::future::pending().await
 }
 
+/// Whether the host handles a `FileAction` (everydesk). A file-transfer login keeps the stock
+/// behaviour (always handled). A screen session (`DEFAULT_CONN`) handles it only while it is
+/// authorized and its `file` permission is on, so `SwitchPermission("file", false)` stops it.
+#[cfg(feature = "everydesk")]
+fn file_action_allowed(conn_type_is_ft: bool, authorized: bool, ft_enabled: bool) -> bool {
+    conn_type_is_ft || (authorized && ft_enabled)
+}
+
 lazy_static::lazy_static! {
     // Connections between accept and authorization, oldest first; see admit_unauthorized.
     static ref UNAUTHORIZED_CONNS: Mutex<Vec<(i32, IpAddr, Arc<UnauthorizedShared>)>> = Default::default();
@@ -2316,6 +2324,16 @@ impl Connection {
             if !wait_session_id_confirm {
                 self.try_sub_monitor_services();
             }
+            // Screen session with file permission: send the host's home listing once, as a
+            // file-transfer login does, so the controller learns the remote home path.
+            #[cfg(feature = "everydesk")]
+            if file_action_allowed(false, self.authorized && self.is_remote(), self.file) {
+                if !wait_session_id_confirm {
+                    self.read_dir("", false);
+                } else {
+                    self.delayed_read_dir = Some((String::new(), false));
+                }
+            }
         }
         true
     }
@@ -3631,7 +3649,20 @@ impl Connection {
                     }
                 }
                 Some(message::Union::FileAction(fa)) => {
+                    #[cfg(not(feature = "everydesk"))]
                     let mut handle_fa = self.file_transfer.is_some();
+                    // `self.file` is this connection's file permission (login option, then
+                    // `SwitchPermission("file", ..)`); `is_remote()` limits it to DEFAULT_CONN.
+                    #[cfg(feature = "everydesk")]
+                    let mut handle_fa = file_action_allowed(
+                        self.file_transfer.is_some(),
+                        self.authorized && self.is_remote(),
+                        self.file,
+                    );
+                    #[cfg(feature = "everydesk")]
+                    if handle_fa && self.file_transfer.is_none() {
+                        log::info!("everydesk: file action on screen session");
+                    }
                     if !handle_fa {
                         if let Some(file_action::Union::Send(s)) = fa.union.as_ref() {
                             if JobType::from_proto(s.file_type) == JobType::Printer {
@@ -4166,6 +4197,10 @@ impl Connection {
                                 self.try_sub_camera_displays();
                             } else if !self.terminal {
                                 self.try_sub_monitor_services();
+                                #[cfg(feature = "everydesk")]
+                                if let Some((dir, show_hidden)) = self.delayed_read_dir.take() {
+                                    self.read_dir(&dir, show_hidden);
+                                }
                             }
                         }
                     }
@@ -7576,6 +7611,30 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn default_conn_handles_file_action_when_permitted() {
+        assert!(file_action_allowed(false, true, true));
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn default_conn_refuses_without_permission() {
+        assert!(!file_action_allowed(false, true, false));
+        assert!(!file_action_allowed(false, false, true));
+        assert!(!file_action_allowed(false, false, false));
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn ft_conn_unchanged() {
+        for authorized in [false, true] {
+            for ft_enabled in [false, true] {
+                assert!(file_action_allowed(true, authorized, ft_enabled));
+            }
+        }
+    }
 
     // The registry is process-global and the harness runs tests in parallel threads, so every
     // test that admits connections holds this first; a poisoned lock is still a lock.
