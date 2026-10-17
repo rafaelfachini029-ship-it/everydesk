@@ -4,7 +4,14 @@
   import { DUR, EASE, animate } from '../design/motion.ts'
   import type { ConnEvent } from './connecting/connecting.ts'
   import SessionPill from './session/SessionPill.svelte'
-  import { createAltTap, isDeadZone, nearTopEdge, shouldForwardKey } from './session/sessionPill.ts'
+  import {
+    ALT_IDLE,
+    altTapReducer,
+    isDeadZone,
+    nearTopEdge,
+    shouldForwardKey,
+    type AltEvent,
+  } from './session/sessionPill.ts'
   import Button from './ui/Button.svelte'
   import {
     EVENTS,
@@ -119,6 +126,15 @@
     frameAck()
   }
 
+  let revealReported = false
+  /** Tell App the session view owns the screen (once): after the animation, or at once if
+   *  the session ends during it, so its message reaches the live path, not the gone one. */
+  function revealDone() {
+    if (revealReported) return
+    revealReported = true
+    onrevealed?.()
+  }
+
   /** First frame: open the remote screen from the centre (instant under reduced motion). */
   function reveal() {
     revealed = true
@@ -129,10 +145,7 @@
       [{ clipPath: 'circle(0% at 50% 50%)' }, { clipPath: 'circle(150% at 50% 50%)' }],
       { duration: DUR.slow, easing: EASE.out },
     )
-    a.finished.then(
-      () => onrevealed?.(),
-      () => onrevealed?.(),
-    )
+    a.finished.then(revealDone, revealDone)
     // A hidden or throttled webview may not advance animations: never leave the screen clipped.
     setTimeout(() => a.playState !== 'finished' && a.finish(), DUR.slow + 300)
   }
@@ -207,8 +220,8 @@
   }
   function onPointerDown(e: PointerEvent) {
     e.preventDefault()
-    altTap.cancel()
     if (!revealed || inDeadZone(e)) return
+    alt({ type: 'interrupt' })
     canvas.focus()
     // Capture so the matching pointerup arrives even if released outside the window.
     canvas.setPointerCapture(e.pointerId)
@@ -225,22 +238,40 @@
   function onWheel(e: WheelEvent) {
     e.preventDefault()
     if (!revealed || inDeadZone(e)) return
+    alt({ type: 'interrupt' })
     const s = accumulateWheel(wheelAcc, e.deltaX, e.deltaY, e.deltaMode)
     const mask = mouseMask(MouseButton.none, MouseEvt.wheel)
     for (let i = 0; i < Math.abs(s.x); i++) sendMouse(mask, Math.sign(s.x), 0, mods(e))
     for (let i = 0; i < Math.abs(s.y); i++) sendMouse(mask, 0, Math.sign(s.y), mods(e))
   }
 
-  const altTap = createAltTap()
+  // Bare Alt taps summon the pill and never reach the remote (sessionPill.ts altTapReducer).
+  let altState = ALT_IDLE
+  /** Feeds the Alt machine; sends any held-back Alt; returns whether the event goes on. */
+  function alt(ev: AltEvent): boolean {
+    const r = altTapReducer(altState, ev)
+    altState = r.state
+    for (const k of r.send) {
+      const name = keyName(k.code, 'Alt')
+      if (!name) continue
+      if (k.down) heldKeys.add(name)
+      else heldKeys.delete(name)
+      sendKey(name, k.down, false, { ...NO_MODS, alt: k.down })
+    }
+    if (r.summon) queueMicrotask(() => pill?.summon())
+    return r.forward
+  }
 
   function onKey(e: KeyboardEvent, down: boolean) {
-    if (down) altTap.down(e.key, e.repeat)
-    else if (altTap.up(e.key) && revealed) queueMicrotask(() => pill?.summon())
-    const name = keyName(e.code, e.key)
-    if (!name) return
+    const isAlt = e.key === 'Alt'
     if (!down) {
+      if (!alt({ type: 'up', alt: isAlt, t: e.timeStamp })) {
+        if (isAlt) e.preventDefault()
+        return
+      }
+      const name = keyName(e.code, e.key)
       // A release always goes out for a key the peer holds, wherever focus went meanwhile.
-      if (!heldKeys.delete(name)) return
+      if (!name || !heldKeys.delete(name)) return
       e.preventDefault()
       sendKey(name, false, false, mods(e))
       return
@@ -251,7 +282,17 @@
       canvasFocused: target === canvas || target === document.body,
       pillFocused: !!pill?.owns(target),
     })
-    if (!ok) return
+    // Typing in the pill or a password field: never a tap, never forwarded.
+    if (!ok) {
+      alt({ type: 'reset' })
+      return
+    }
+    if (!alt({ type: 'down', alt: isAlt, code: e.code, repeat: e.repeat, t: e.timeStamp })) {
+      e.preventDefault()
+      return
+    }
+    const name = keyName(e.code, e.key)
+    if (!name) return
     e.preventDefault()
     heldKeys.add(name)
     sendKey(name, true, false, mods(e))
@@ -261,7 +302,7 @@
   function releaseAll() {
     releaseKeys()
     releaseButtons()
-    altTap.cancel()
+    alt({ type: 'reset' })
     wheelAcc.x = 0
     wheelAcc.y = 0
   }
@@ -301,7 +342,10 @@
       listen<Quality>(EVENTS.quality, (e) => {
         quality.update((prev) => mergeQuality(prev, e.payload))
       }),
-      listen(EVENTS.closed, () => onclosed(lastMsg)),
+      listen(EVENTS.closed, () => {
+        if (revealed) revealDone()
+        onclosed(lastMsg)
+      }),
     ]
     const down = (e: KeyboardEvent) => onKey(e, true)
     const up = (e: KeyboardEvent) => onKey(e, false)

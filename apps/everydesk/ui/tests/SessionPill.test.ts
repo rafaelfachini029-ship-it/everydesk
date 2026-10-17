@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  ALT_IDLE,
+  ALT_TAP_MS,
   HIDE_MS,
-  createAltTap,
+  altTapReducer,
   createHideTimer,
   formatFps,
   formatLatency,
@@ -51,20 +53,56 @@ test('top edge summons the pill', () => {
   assert.equal(nearTopEdge(-1), false)
 })
 
-test('Alt tap: alone counts, Alt+key or a held repeat-only press does not break it wrongly', () => {
-  const t = createAltTap()
-  t.down('Alt', false)
-  assert.equal(t.up('Alt'), true)
-  t.down('Alt', false)
-  t.down('Alt', true)
-  assert.equal(t.up('Alt'), true)
-  t.down('Alt', false)
-  t.down('Tab', false)
-  assert.equal(t.up('Alt'), false)
-  t.down('Alt', false)
-  t.cancel()
-  assert.equal(t.up('Alt'), false)
-  assert.equal(t.up('Alt'), false)
+test('Alt+key combo: Alt down goes first, then the key; release forwards normally', () => {
+  let r = altTapReducer(ALT_IDLE, { type: 'down', alt: true, code: 'AltLeft', repeat: false, t: 0 })
+  assert.deepEqual([r.send, r.forward, r.summon], [[], false, false])
+  r = altTapReducer(r.state, { type: 'down', alt: false, code: 'Tab', repeat: false, t: 50 })
+  assert.deepEqual(r.send, [{ code: 'AltLeft', down: true }])
+  assert.equal(r.forward, true)
+  r = altTapReducer(r.state, { type: 'up', alt: false, t: 80 })
+  assert.equal(r.forward, true)
+  r = altTapReducer(r.state, { type: 'up', alt: true, t: 100 })
+  assert.deepEqual([r.send, r.forward, r.summon, r.state], [[], true, false, ALT_IDLE])
+})
+
+test('bare Alt tap: nothing reaches the remote, the pill is summoned', () => {
+  let r = altTapReducer(ALT_IDLE, { type: 'down', alt: true, code: 'AltRight', repeat: false, t: 1000 })
+  r = altTapReducer(r.state, { type: 'down', alt: true, code: 'AltRight', repeat: true, t: 1100 })
+  assert.deepEqual([r.send, r.forward], [[], false])
+  r = altTapReducer(r.state, { type: 'up', alt: true, t: 1000 + ALT_TAP_MS - 1 })
+  assert.deepEqual([r.send, r.forward, r.summon, r.state], [[], false, true, ALT_IDLE])
+})
+
+test('Alt held alone past the threshold still reaches the remote (down, up)', () => {
+  let r = altTapReducer(ALT_IDLE, { type: 'down', alt: true, code: 'AltLeft', repeat: false, t: 0 })
+  r = altTapReducer(r.state, { type: 'up', alt: true, t: ALT_TAP_MS })
+  assert.deepEqual(r.send, [
+    { code: 'AltLeft', down: true },
+    { code: 'AltLeft', down: false },
+  ])
+  assert.deepEqual([r.forward, r.summon], [false, false])
+  // with OS auto-repeat the down goes out as soon as the hold is long enough
+  r = altTapReducer(ALT_IDLE, { type: 'down', alt: true, code: 'AltLeft', repeat: false, t: 0 })
+  r = altTapReducer(r.state, { type: 'down', alt: true, code: 'AltLeft', repeat: true, t: ALT_TAP_MS })
+  assert.deepEqual(r.send, [{ code: 'AltLeft', down: true }])
+  r = altTapReducer(r.state, { type: 'up', alt: true, t: ALT_TAP_MS + 500 })
+  assert.deepEqual([r.send, r.forward, r.summon], [[], true, false])
+})
+
+test('click or wheel with Alt commits it; reset drops a held-back Alt', () => {
+  let r = altTapReducer(ALT_IDLE, { type: 'down', alt: true, code: 'AltLeft', repeat: false, t: 0 })
+  r = altTapReducer(r.state, { type: 'interrupt' })
+  assert.deepEqual(r.send, [{ code: 'AltLeft', down: true }])
+  r = altTapReducer(r.state, { type: 'up', alt: true, t: 50 })
+  assert.deepEqual([r.forward, r.summon], [true, false])
+  r = altTapReducer(ALT_IDLE, { type: 'down', alt: true, code: 'AltLeft', repeat: false, t: 0 })
+  r = altTapReducer(r.state, { type: 'reset' })
+  assert.deepEqual([r.send, r.state], [[], ALT_IDLE])
+  r = altTapReducer(r.state, { type: 'up', alt: true, t: 50 })
+  assert.deepEqual([r.send, r.summon], [[], false])
+  // outside a held-back Alt, other keys and interrupts pass untouched
+  assert.equal(altTapReducer(ALT_IDLE, { type: 'down', alt: false, code: 'KeyA', repeat: false, t: 0 }).forward, true)
+  assert.equal(altTapReducer(ALT_IDLE, { type: 'interrupt' }).send.length, 0)
 })
 
 test('pill hides HIDE_MS (2 s) after leaving; coming back to the top restarts it', (t) => {

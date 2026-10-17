@@ -76,9 +76,24 @@
     shown = true
     tick().then(() => dock.querySelector<HTMLElement>('.pill')?.focus())
   }
+  // The rect is read on every pointer event: cache it, drop it whenever it can move
+  // (size change, end of a show/hide/expand transition, window resize, shown toggles).
+  let rect: Rect | null = null
+  const stale = () => (rect = null)
+  $effect(() => {
+    void shown
+    stale()
+    const ro = new ResizeObserver(stale)
+    ro.observe(dock)
+    window.addEventListener('resize', stale)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', stale)
+    }
+  })
   /** Where pointer input must not reach the remote; null while hidden. */
   export function hitRect(): Rect | null {
-    return shown ? dock.getBoundingClientRect() : null
+    return shown ? (rect ??= dock.getBoundingClientRect()) : null
   }
   export function owns(node: Node | null): boolean {
     return !!node && dock.contains(node)
@@ -120,6 +135,7 @@
   {onfocusin}
   {onfocusout}
   {onkeydowncapture}
+  ontransitionend={stale}
 >
   <Pill label="Controles da sessão" bind:expanded>
     {#snippet summary()}
@@ -150,6 +166,7 @@
         <button
           class="tool"
           aria-disabled="true"
+          onclick={onreturn}
           aria-label="Monitores"
           aria-describedby="{uid}-one"
           onpointerenter={() => show('Um monitor só')}
@@ -164,6 +181,7 @@
     <button
       class="tool wide"
       aria-disabled="true"
+          onclick={onreturn}
       aria-label="Qualidade automática"
       aria-describedby="{uid}-soon"
       onpointerenter={() => show(`Qualidade · ${SOON}`)}
@@ -181,6 +199,7 @@
       <button
         class="tool"
         aria-disabled="true"
+          onclick={onreturn}
         aria-label={t.label}
         aria-describedby="{uid}-soon"
         onpointerenter={() => show(`${t.label} · ${SOON}`)}
