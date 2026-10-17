@@ -22,6 +22,8 @@
   import {
     CHAT_EMPTY,
     CHAT_EVENTS,
+    CHAT_MAX_CHARS,
+    charsLeft,
     chatKey,
     chatReducer,
     formatAt,
@@ -47,6 +49,7 @@
   let chat = $state(CHAT_EMPTY)
   let shown = $state(false)
   let draft = $state('')
+  const count = $derived(charsLeft(draft))
   let error = $state<string | null>(null)
   let sending = $state(false)
   let root: HTMLSpanElement
@@ -189,7 +192,9 @@
           bind:value={draft}
           rows="1"
           placeholder="Responder"
+          maxlength={CHAT_MAX_CHARS + 200}
           aria-label="Resposta para {who}"
+          aria-describedby={count ? `${uid}-count` : undefined}
           onfocus={engage}
           {onkeydown}
         ></textarea>
@@ -197,6 +202,7 @@
           <Icon icon={SendHorizontal} size={16} />
         </button>
       </div>
+      {#if count}<p class="limit t-num" class:over={count.over} id="{uid}-count">{count.text}</p>{/if}
       {#if error}<p class="error" role="alert">{error}</p>{/if}
     </div>
   {/if}
@@ -410,5 +416,13 @@
     margin: 0;
     color: var(--danger);
     font-size: var(--fs-label);
+  }
+  .limit {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--fs-label);
+  }
+  .limit.over {
+    color: var(--danger);
   }
 </style>

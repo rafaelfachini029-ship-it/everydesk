@@ -1,7 +1,8 @@
 <!--
   VoiceTool — the pill's "Voz" tool (spec §5.3, voz com um clique). One click asks the other
   machine for a voice call (the tool reads "chamando…" until it answers), a click while
-  calling cancels, a click while on hangs up. The voice dot in the collapsed pill (VoiceDot)
+  calling cancels, a click while on hangs up. Unanswered for 60 s (voice.ts RING_TIMEOUT_MS)
+  the call is cancelled and the note says "A outra máquina não atendeu." The voice dot in the collapsed pill (VoiceDot)
   follows the same state. A call that ends without the person asking (refused, hung up by
   the other side) is said once in a short note under the pill, which comes down for it
   (`onattention`), like the chat preview.
@@ -20,7 +21,7 @@
   import Mic from 'lucide-svelte/icons/mic'
   import Icon from '../ui/Icon.svelte'
   import { extras } from '../session'
-  import { VOICE_EVENTS, clickIntent, dispatchVoice, voice, voiceHint, type VoiceEvent } from './voice.ts'
+  import { RING_TIMEOUT_MS, VOICE_EVENTS, clickIntent, dispatchVoice, voice, voiceHint, type VoiceEvent } from './voice.ts'
 
   interface Props {
     onreturn: () => void
@@ -55,6 +56,16 @@
       endNotice(false)
       dispatchVoice({ type: 'reset' })
     }
+  })
+
+  // Ringing with no answer: give up after RING_TIMEOUT_MS ("A outra máquina não atendeu.").
+  $effect(() => {
+    if (phase !== 'waiting') return
+    const t = setTimeout(() => {
+      dispatchVoice({ type: 'timeout' })
+      invoke('session_voice', { start: false }).catch((e) => console.warn('everydesk: voice cancel failed', e))
+    }, RING_TIMEOUT_MS)
+    return () => clearTimeout(t)
   })
 
   // A new note: bring the pill down for it, then let it go.

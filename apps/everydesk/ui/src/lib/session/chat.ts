@@ -42,6 +42,21 @@ export type ChatAction =
   | { type: 'open' }
   | { type: 'close' }
 
+/** A received message as shown: past CHAT_MAX_CHARS characters it is cut and ends in "…" (the
+ *  other side may run anything; mirrors `commands.rs::cap_incoming`). */
+export function capIncoming(text: string): string {
+  const chars = [...text]
+  return chars.length > CHAT_MAX_CHARS ? chars.slice(0, CHAT_MAX_CHARS).join('') + '…' : text
+}
+
+/** "restam 120 caracteres" near the limit, "3 caracteres a mais" past it; null well below. */
+export function charsLeft(draft: string): { left: number; over: boolean; text: string } | null {
+  const left = CHAT_MAX_CHARS - [...draft.trim()].length
+  if (left < 0) return { left, over: true, text: `${-left} ${left === -1 ? 'caractere' : 'caracteres'} a mais` }
+  if (left < 200) return { left, over: false, text: `restam ${left} ${left === 1 ? 'caractere' : 'caracteres'}` }
+  return null
+}
+
 /** Ordered by time; same instant keeps arrival order. */
 function insert(list: ChatMsg[], m: ChatMsg): ChatMsg[] {
   let i = list.length
@@ -56,7 +71,8 @@ export function chatReducer(s: ChatState, a: ChatAction): ChatState {
     case 'received':
     case 'sent': {
       const mine = a.type === 'sent'
-      const messages = insert(s.messages, { id: s.nextId, text: a.text, at: a.at, mine })
+      const text = mine ? a.text : capIncoming(a.text)
+      const messages = insert(s.messages, { id: s.nextId, text, at: a.at, mine })
       const unread = !mine && !s.open ? s.unread + 1 : s.unread
       return { ...s, messages, unread, nextId: s.nextId + 1 }
     }
@@ -64,7 +80,8 @@ export function chatReducer(s: ChatState, a: ChatAction): ChatState {
       // Only what is not already here (a `cm:chat` can arrive before `cm_pending` answers).
       let { messages, nextId } = s
       let unread = s.unread
-      for (const m of a.messages) {
+      for (const raw of a.messages) {
+        const m = raw.mine ? raw : { ...raw, text: capIncoming(raw.text) }
         if (messages.some((x) => x.at === m.at && x.mine === m.mine && x.text === m.text)) continue
         messages = insert(messages, { id: nextId++, text: m.text, at: m.at, mine: m.mine })
       }

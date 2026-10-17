@@ -67,7 +67,7 @@
     // A webview that mounts mid-recording (reload) asks once.
     invoke<boolean>('session_is_recording')
       .then((r) => r && dispatchRecord({ type: 'event', on: true, at: Date.now() }))
-      .catch(() => {})
+      .catch((e) => console.warn('everydesk: session_is_recording (hydrate) failed', e))
     return () => {
       uns.forEach((u) => u.then((f) => f()))
       clear()

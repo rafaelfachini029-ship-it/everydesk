@@ -33,7 +33,12 @@ export const VOICE_OFF: Voice = { state: 'off', notice: null }
 export const VOICE_NOTICES = {
   recusada: 'A outra máquina recusou a voz.',
   encerrada: 'Voz encerrada.',
+  semResposta: 'A outra máquina não atendeu.',
 } as const
+
+/** A voice call rings this long: then the controller gives up ("não atendeu") and the host's
+ *  card answers "Recusar" by itself. */
+export const RING_TIMEOUT_MS = 60_000
 
 /** The reason the engine gives when this side hung up (client/io_loop.rs). */
 export const SELF_CLOSE_REASON = 'Closed manually by the peer'
@@ -49,6 +54,8 @@ export type VoiceAction =
   | { type: 'stop' }
   /** `session_voice` failed: nothing is ringing. */
   | { type: 'failed'; message: string }
+  /** Nobody answered within RING_TIMEOUT_MS: the call is cancelled. */
+  | { type: 'timeout' }
   /** The notice was shown long enough. */
   | { type: 'seen' }
   /** A new session (or none). */
@@ -72,6 +79,8 @@ export function voiceReducer(s: Voice, a: VoiceAction): Voice {
       return VOICE_OFF
     case 'failed':
       return { state: 'off', notice: a.message }
+    case 'timeout':
+      return s.state === 'waiting' ? { state: 'off', notice: VOICE_NOTICES.semResposta } : s
     case 'seen':
       return s.notice === null ? s : { ...s, notice: null }
     case 'reset':
@@ -83,6 +92,8 @@ export function voiceReducer(s: Voice, a: VoiceAction): Voice {
         case 'on':
           return { state: 'on', notice: null }
         case 'off':
+          // already off (a timeout, a cancel): the engine's late "off" keeps what was said
+          if (s.state === 'off') return s
           return { state: 'off', notice: closeNotice(s.state, a.event.reason) }
         default:
           // `incoming` is the host's side; the controller never gets it.

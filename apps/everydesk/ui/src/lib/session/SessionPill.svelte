@@ -4,7 +4,8 @@
   the session tools; it hides 2 s after the pointer and focus leave, and comes back when the
   pointer reaches the top edge (peek) or on an Alt tap (summon, which also focuses it).
   Only what works is here (sessionPill.ts PILL_TOOLS): monitors, Arquivos (the system picker;
-  dropping on the screen sends too), the quality reading and Encerrar. File sends show as a
+  dropping on the screen sends too), Gravar, Voz, Conversa, Mais (where the quality choice
+  lives) and Encerrar. The frame rate reads in the hint line while no tool is pointed at. File sends show as a
   line of light along the pill's lower edge (all of them together) and as the FileTrail rows
   under it; while the trail has anything to show the pill stays up. On narrow windows (or
   200 % zoom) the pill wraps onto two rows so Encerrar is never clipped.
@@ -19,7 +20,6 @@
   import { invoke } from '@tauri-apps/api/core'
   import { onDestroy, onMount, tick } from 'svelte'
   import Monitor from 'lucide-svelte/icons/monitor'
-  import Gauge from 'lucide-svelte/icons/gauge'
   import PhoneOff from 'lucide-svelte/icons/phone-off'
   import FileUp from 'lucide-svelte/icons/file-up'
   import Button from '../ui/Button.svelte'
@@ -33,7 +33,7 @@
   import RecordLamp from './RecordLamp.svelte'
   import RecordTool from './RecordTool.svelte'
   import { recording } from './record.ts'
-  import { VIEW_ONLY_FILES, filesAllowed, qualityLabel } from './more.ts'
+  import { VIEW_ONLY_FILES, filesAllowed } from './more.ts'
   import type { Contact } from '../policy.ts'
   import { currentDisplay, dispatchJobs, displayList, extras, jobs, pickAndSend, quality, switchDisplay } from '../session'
   import { overall, trailBusy } from './jobs.ts'
@@ -55,7 +55,6 @@
   let hint = $state<string | null>(null)
 
   const latency = $derived(formatLatency($quality.delay))
-  const level = $derived(qualityLabel($extras.quality))
   // Só olhar sends no files either (the Arquivos tool reads as unavailable)
   const sends = $derived(filesAllowed($extras))
   const filesHint = $derived(sends ? 'Enviar arquivos para a outra máquina' : VIEW_ONLY_FILES)
@@ -222,13 +221,6 @@
         </button>
         <RecordTool {onreturn} onhint={show} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
 
-        <span class="quality">
-          <span class="glyph"><Icon icon={Gauge} /></span>
-          <span class="auto">{level}</span>
-          {#if fps}<span class="fps t-num" aria-hidden="true">{fps}</span>{/if}
-          <span class="sr-only">Qualidade {level}{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
-        </span>
-
         <VoiceTool {onreturn} onhint={show} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
         <ChatPanel active={expanded} {onreturn} who={name ?? peerId} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
         <MorePanel active={expanded} {onreturn} />
@@ -242,7 +234,8 @@
         ><span></span></span
       >
     </div>
-    <p class="hint" class:on={expanded && hint} aria-hidden="true">{hint ?? ''}</p>
+    <!-- the frame rate reads here while no tool is pointed at; the quality choice is in Mais -->
+    <p class="hint" class:on={expanded && (hint || fps)} class:t-num={!hint} aria-hidden="true">{hint ?? fps ?? ''}</p>
   </div>
   <FileTrail {onreturn} />
 </div>
@@ -423,24 +416,6 @@
   .tool.num[aria-pressed='true'] {
     border-color: var(--line-strong);
     background: var(--surface-2);
-  }
-  .quality {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 0 var(--space-2) 0 var(--space-1);
-    white-space: nowrap;
-  }
-  .quality .glyph {
-    padding: 0;
-  }
-  .auto {
-    font-size: var(--fs-body);
-    color: var(--text);
-  }
-  .fps {
-    font-size: var(--fs-body);
-    color: var(--text-muted);
   }
   .rule {
     width: 1px;

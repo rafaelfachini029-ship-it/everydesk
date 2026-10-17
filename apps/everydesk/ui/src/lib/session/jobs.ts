@@ -10,6 +10,8 @@
  */
 
 export const DENIED = 'A outra máquina não permite receber arquivos.'
+/** A row the host stopped by turning file permission off mid-transfer. */
+export const CANCELLED_BY_HOST = 'Cancelado: a outra máquina desligou o envio de arquivos.'
 /** A finished row stays this long, then fades. */
 export const DONE_FADE_MS = 3000
 /** A note (refused send) stays this long. */
@@ -31,6 +33,8 @@ export interface Job {
   ask: { fileNum: number } | null
   /** Files of this job left as they were on the host ("Não"). */
   kept: number
+  /** Files in the job (a folder's count from `job_added.files`; 0 = unknown, 1 = a file). */
+  files: number
   /** When it ended (done or error), for the fade. */
   endedAt: number | null
 }
@@ -63,6 +67,8 @@ export interface JobAdded {
   name: string
   to: string
   total: number
+  /** Files in the job (absent or 0 = unknown). */
+  files?: number
   preparing?: boolean
 }
 
@@ -75,12 +81,12 @@ export type JobsAction =
   | { type: 'failed'; id: number; message: string; at: number }
   | { type: 'dropped'; ids: number[] }
   | { type: 'cleared' }
-  | { type: 'permission'; name: string; value: boolean }
+  | { type: 'permission'; name: string; value: boolean; at?: number }
   | { type: 'refused'; message: string; at: number }
   | { type: 'tick'; now: number }
 
 function newJob(id: number, name = 'Arquivo', total = 0, status: JobStatus = 'sending'): Job {
-  return { id, name, total, sent: 0, speed: 0, status, err: null, ask: null, kept: 0, endedAt: null }
+  return { id, name, total, sent: 0, speed: 0, status, err: null, ask: null, kept: 0, files: 0, endedAt: null }
 }
 
 const patch = (s: JobsState, id: number, f: (j: Job) => Job): JobsState => ({
@@ -91,6 +97,8 @@ const patch = (s: JobsState, id: number, f: (j: Job) => Job): JobsState => ({
 /** Host error text (English, from the engine) → what the person reads. */
 export function friendlyError(err: string | null | undefined): string {
   const e = (err ?? '').toLowerCase()
+  // the host's own refusal (connection.rs `ed_files::REFUSED`), e.g. a job it stopped
+  if (e.includes('não permitido')) return 'Cancelado: a outra máquina não permite receber arquivos agora.'
   if (e.includes('permission') || e.includes('denied') || e.includes('access'))
     return 'A outra máquina não deixou gravar o arquivo.'
   if (e.includes('space') || e.includes('disk full')) return 'Falta espaço na outra máquina.'
@@ -107,10 +115,14 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
         return patch(s, id, (j) => ({
           ...j,
           name,
+          files: a.ev.files ?? j.files,
           total: preparing ? j.total : total,
           status: j.status === 'preparing' && !preparing ? 'sending' : j.status,
         }))
-      return { ...s, jobs: [...s.jobs, newJob(id, name, total, preparing ? 'preparing' : 'sending')] }
+      return {
+        ...s,
+        jobs: [...s.jobs, { ...newJob(id, name, total, preparing ? 'preparing' : 'sending'), files: a.ev.files ?? 0 }],
+      }
     }
     case 'job': {
       const ev = a.ev
@@ -133,6 +145,9 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
               speed: ev.speed,
             }
           case 'done':
+            // A folder is one job: it is done only when its LAST file is (the engine's done
+            // carries the file index it reached; an earlier one is not the end).
+            if (!lastFile(j, ev.file_num)) return j
             return { ...j, status: 'done', ask: null, speed: 0, endedAt: a.at }
           case 'error':
             return { ...j, status: 'error', ask: null, speed: 0, err: friendlyError(ev.err), endedAt: a.at }
@@ -163,7 +178,15 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
       return { ...s, jobs: [] }
     case 'permission':
       if (a.name !== 'file') return s
-      if (!a.value) return { ...s, note: DENIED, noteAt: Number.POSITIVE_INFINITY }
+      if (!a.value) {
+        // the host stops what was moving: those rows read as cancelled, not as stuck
+        const jobs = s.jobs.map((j) =>
+          j.status === 'preparing' || j.status === 'sending' || j.status === 'ask'
+            ? { ...j, status: 'error' as const, ask: null, speed: 0, err: CANCELLED_BY_HOST, endedAt: a.at ?? 0 }
+            : j,
+        )
+        return { ...s, jobs, note: DENIED, noteAt: Number.POSITIVE_INFINITY }
+      }
       return s.note === DENIED ? { ...s, note: null } : s
     case 'refused':
       return { ...s, note: a.message, noteAt: a.at }
@@ -174,6 +197,12 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
       return { ...s, jobs, note: keepNote ? s.note : null }
     }
   }
+}
+
+/** Is the done at `fileNum` the end of the job? Always for a file or an unknown count; for a
+ *  folder of n files only from index n-1 on (the engine ends at n), or without an index (-1). */
+export function lastFile(j: Pick<Job, 'files'>, fileNum: number): boolean {
+  return j.files <= 1 || fileNum < 0 || fileNum >= j.files - 1
 }
 
 /** 0..100, or null when the size is unknown. Never 100 before the host says done. */
@@ -211,7 +240,8 @@ export function jobLine(j: Job): string {
     case 'error':
       return j.err ?? 'O envio parou.'
     case 'done':
-      return j.kept > 0 && j.sent === 0 ? 'Mantido o que já estava lá' : 'Enviado'
+      if (j.kept > 0 && j.sent === 0) return 'Mantido o que já estava lá'
+      return j.files > 1 ? `Pasta enviada (${j.files} arquivos)` : 'Enviado'
     case 'sending': {
       const p = percent(j)
       return [p === null ? '' : `${p} %`, formatSpeed(j.speed)].filter(Boolean).join(' · ')

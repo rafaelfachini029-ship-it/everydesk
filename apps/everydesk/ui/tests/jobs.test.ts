@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
+  CANCELLED_BY_HOST,
   DENIED,
   DONE_FADE_MS,
   EMPTY,
@@ -172,4 +173,33 @@ test('a refused drop removes its rows; a bad name fails only that row, with the 
   assert.deepEqual(s.jobs.map((j) => j.id), [2])
   s = jobsReducer(s, { type: 'refused', message: 'A outra máquina não respondeu. Tente de novo.', at: 1 })
   assert.equal(s.note, 'A outra máquina não respondeu. Tente de novo.')
+})
+
+test('a folder is done only when its last file is; the row says "Pasta enviada"', () => {
+  const folder: JobsAction = { type: 'added', ev: { id: 4, name: 'Fotos', to: '/h/Desktop/Fotos', total: 300, files: 3 } }
+  let s = run([folder, ev(4, 'progress', 100)])
+  s = run([ev(4, 'done', 0, 0, null, 0)], s) // an earlier file: not the end
+  assert.equal(s.jobs[0].status, 'sending')
+  s = run([ev(4, 'done', 0, 0, null, 3)], s) // the engine ends at the file count
+  assert.equal(s.jobs[0].status, 'done')
+  assert.equal(jobLine(s.jobs[0]), 'Pasta enviada (3 arquivos)')
+  // a file (or an unknown count) is done on its done, as before
+  const one = run([added(5, 'a.txt', 10), ev(5, 'done')])
+  assert.equal(jobLine(one.jobs[0]), 'Enviado')
+})
+
+test('FIX-BEFORE-E2E: the host revoking file permission mid-transfer cancels the moving rows', () => {
+  let s = run([added(6, 'a.bin', 100), ev(6, 'progress', 40), added(7, 'b.bin', 10), ev(7, 'done')])
+  s = run([{ type: 'permission', name: 'file', value: false, at: 5000 }], s)
+  const [a, b] = s.jobs
+  assert.equal(a.status, 'error')
+  assert.equal(a.err, CANCELLED_BY_HOST)
+  assert.equal(a.endedAt, 5000)
+  assert.equal(b.status, 'done') // what already arrived stays done
+  assert.equal(s.note, DENIED)
+  // the engine's cancel error that follows does not change the row
+  assert.equal(run([ev(6, 'error', 0, 0, 'cancelled')], s).jobs[0].err, CANCELLED_BY_HOST)
+  // view-only mid-upload: no permission event, only the host's refusal → cancelled
+  const v = run([added(8, 'c.bin', 100), ev(8, 'progress', 10), ev(8, 'error', 0, 0, 'não permitido nesta sessão', -1)])
+  assert.match(v.jobs[0].err ?? '', /^Cancelado/)
 })

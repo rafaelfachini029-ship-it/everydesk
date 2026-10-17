@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { get } from 'svelte/store'
+import { readFileSync } from 'node:fs'
 import {
+  RING_TIMEOUT_MS,
   SELF_CLOSE_REASON,
   VOICE_DENIED,
   VOICE_MUTED,
@@ -125,4 +127,24 @@ test('host: cm:voice to card / indicator, hydrated from cm_pending', () => {
   assert.equal(hydrateVoice(list, 3), 'none')
   assert.equal(hydrateVoice(undefined, 1), 'none')
   assert.equal(voiceTitle('Mãe'), 'Mãe quer conversar por voz')
+})
+
+test('a call nobody answers gives up after 60 s on both ends', () => {
+  assert.equal(RING_TIMEOUT_MS, 60_000)
+  const s = run([{ type: 'start' }, { type: 'timeout' }])
+  assert.deepEqual(s, { state: 'off', notice: 'A outra máquina não atendeu.' })
+  assert.equal(VOICE_NOTICES.semResposta, 'A outra máquina não atendeu.')
+  // the engine's "off" for the cancel that follows keeps that notice
+  assert.deepEqual(run([ev('off', SELF_CLOSE_REASON)], s), s)
+  assert.deepEqual(run([ev('off', '')], s), s)
+  // a timeout only ends a ringing call
+  const on = run([ev('on')])
+  assert.deepEqual(run([{ type: 'timeout' }], on), on)
+  assert.deepEqual(run([{ type: 'timeout' }]), VOICE_OFF)
+  // the tool cancels the call; the host's card refuses by itself
+  const tool = readFileSync(new URL('../src/lib/session/VoiceTool.svelte', import.meta.url), 'utf8')
+  assert.match(tool, /RING_TIMEOUT_MS/)
+  assert.match(tool, /type: 'timeout'/)
+  const card = readFileSync(new URL('../src/lib/host/VoiceCard.svelte', import.meta.url), 'utf8')
+  assert.match(card, /setTimeout\(\(\) => answer\(false\), RING_TIMEOUT_MS\)/)
 })

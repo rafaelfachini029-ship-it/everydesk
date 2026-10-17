@@ -35,7 +35,7 @@
       listen<{ ids: number[] }>(EVENTS.jobsDropped, (e) => dispatchJobs({ type: 'dropped', ids: e.payload.ids })),
       listen(EVENTS.jobsCleared, () => dispatchJobs({ type: 'cleared' })),
       listen<{ name: string; value: boolean }>(EVENTS.permission, (e) =>
-        dispatchJobs({ type: 'permission', name: e.payload.name, value: e.payload.value }),
+        dispatchJobs({ type: 'permission', name: e.payload.name, value: e.payload.value, at: Date.now() }),
       ),
     ]
     const tick = setInterval(() => dispatchJobs({ type: 'tick', now: Date.now() }), 500)

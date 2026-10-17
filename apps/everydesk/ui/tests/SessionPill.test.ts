@@ -42,11 +42,16 @@ test('keys reach the remote only from the revealed screen, never from the pill o
   assert.equal(shouldForwardKey({ canvasFocused: true, pillFocused: false, revealed: true }), true)
 })
 
-test('the pill holds only tools that work: no "em breve" tools', () => {
-  assert.deepEqual([...PILL_TOOLS], ['monitores', 'arquivos', 'qualidade', 'encerrar'])
-  for (const gone of ['conversa', 'gravar', 'voz']) assert.ok(!(PILL_TOOLS as readonly string[]).includes(gone), gone)
+test('the pill holds only tools that work: no "em breve" tools, quality lives in Mais', () => {
+  assert.deepEqual([...PILL_TOOLS], ['monitores', 'arquivos', 'gravar', 'voz', 'conversa', 'mais', 'encerrar'])
+  assert.ok(!(PILL_TOOLS as readonly string[]).includes('qualidade'))
   const src = readFileSync(new URL('../src/lib/session/SessionPill.svelte', import.meta.url), 'utf8')
-  assert.doesNotMatch(src, /em breve|SOON|icons\/(messages-square|folder|circle-dot|mic)'/)
+  assert.doesNotMatch(src, /em breve|SOON/)
+  // each Stage 4 tool is really in the pill
+  for (const tool of ['<RecordTool', '<VoiceTool', '<ChatPanel', '<MorePanel']) assert.ok(src.includes(tool), tool)
+  // no quality control or reading of its own: only the fps, in the hint line
+  assert.doesNotMatch(src, /icons\/gauge|qualityLabel|class="quality"/)
+  assert.match(src, /hint \?\? fps/)
   assert.match(src, />Encerrar</)
 })
 

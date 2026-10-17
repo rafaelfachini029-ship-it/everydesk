@@ -4,6 +4,8 @@ import {
   CHAT_EMPTY,
   CHAT_KEEP,
   CHAT_MAX_CHARS,
+  capIncoming,
+  charsLeft,
   chatKey,
   chatReducer,
   formatAt,
@@ -112,4 +114,18 @@ test('nothing typed in the chat reaches the remote: the panel lives inside the p
   assert.match(inside, /<ChatPanel /)
   // a key whose target is in the pill (the chat field) is never forwarded
   assert.equal(shouldForwardKey({ revealed: true, canvasFocused: false, pillFocused: true }), false)
+})
+
+test('a received message past 4000 characters is cut with "…"; replies show a counter', () => {
+  const max = 'é'.repeat(CHAT_MAX_CHARS)
+  assert.equal(capIncoming('oi'), 'oi')
+  assert.equal(capIncoming(max), max)
+  assert.equal(capIncoming(max + 'abc'), max + '…')
+  const s = run([{ type: 'received', text: max + 'xyz', at: 1 }])
+  assert.equal(s.messages[0].text, max + '…')
+  const h = run([{ type: 'hydrate', messages: [{ text: max + 'x', at: 1, mine: false }] }])
+  assert.equal(h.messages[0].text, max + '…')
+  assert.equal(charsLeft('oi'), null)
+  assert.deepEqual(charsLeft('a'.repeat(CHAT_MAX_CHARS - 10)), { left: 10, over: false, text: 'restam 10 caracteres' })
+  assert.deepEqual(charsLeft('a'.repeat(CHAT_MAX_CHARS + 1)), { left: -1, over: true, text: '1 caractere a mais' })
 })
