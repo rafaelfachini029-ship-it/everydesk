@@ -4167,10 +4167,23 @@ impl Connection {
                         .lock()
                         .unwrap()
                         .user_auto_adjust_fps(self.inner.id(), fps),
+                    #[cfg(not(feature = "everydesk"))]
                     Some(misc::Union::ClientRecordStatus(status)) => video_service::VIDEO_QOS
                         .lock()
                         .unwrap()
                         .user_record(self.inner.id(), status),
+                    // EveryDesk: also tell the host UI the controller is (not) recording.
+                    #[cfg(feature = "everydesk")]
+                    Some(misc::Union::ClientRecordStatus(status)) => {
+                        video_service::VIDEO_QOS
+                            .lock()
+                            .unwrap()
+                            .user_record(self.inner.id(), status);
+                        self.send_to_cm(ipc::Data::RecordStatus {
+                            conn_id: self.inner.id(),
+                            recording: status,
+                        });
+                    }
                     #[cfg(windows)]
                     Some(misc::Union::SelectedSid(sid)) => {
                         if let Some(current_process_sid) =

@@ -448,6 +448,10 @@ pub enum Data {
     /// EveryDesk, CM -> connection: the owner revoked this peer's pairing; end its session.
     #[cfg(feature = "everydesk")]
     Revoke { peer_id: String },
+    /// EveryDesk, connection -> CM: the controller started (`true`) or stopped (`false`)
+    /// recording this session (`Misc::client_record_status`), so the host UI can show it.
+    #[cfg(feature = "everydesk")]
+    RecordStatus { conn_id: i32, recording: bool },
     // CM-side file reading responses (Windows only)
     // These are sent from CM back to Connection when CM handles file reading
     /// Response to ReadFile: contains initial file list or error

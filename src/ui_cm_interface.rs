@@ -149,6 +149,11 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    /// EveryDesk: the controller is recording this session right now (`Data::RecordStatus`).
+    /// Distinct from `recording`, which is the permission to record.
+    #[cfg(feature = "everydesk")]
+    #[serde(default)]
+    pub peer_recording: bool,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -229,6 +234,11 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
         _key_changed: bool,
     ) {
     }
+
+    /// EveryDesk: the controller of `id` started (`true`) or stopped (`false`) recording
+    /// the session. Default no-op so other CM front-ends need not care.
+    #[cfg(feature = "everydesk")]
+    fn record_status(&self, _id: i32, _recording: bool) {}
 }
 
 impl<T: InvokeUiCM> Deref for ConnectionManager<T> {
@@ -292,6 +302,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
+            #[cfg(feature = "everydesk")]
+            peer_recording: false,
         };
         CLIENTS
             .write()
@@ -368,6 +380,17 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             client.in_voice_call = false;
             self.ui_handler.update_voice_call_state(client);
         }
+    }
+
+    /// EveryDesk: remember the controller's recording state for `id` and tell the UI.
+    #[cfg(feature = "everydesk")]
+    fn record_status(&self, id: i32, recording: bool) {
+        if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
+            client.peer_recording = recording;
+        } else {
+            return;
+        }
+        self.ui_handler.record_status(id, recording);
     }
 
     #[cfg(not(target_os = "ios"))]
@@ -675,6 +698,10 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 #[cfg(feature = "everydesk")]
                                 Data::PairOffer { conn_id: _, peer_id, name, avatar, key_changed } => {
                                     self.cm.pair_offer(self.conn_id, peer_id, name, avatar, key_changed);
+                                }
+                                #[cfg(feature = "everydesk")]
+                                Data::RecordStatus { conn_id: _, recording } => {
+                                    self.cm.record_status(self.conn_id, recording);
                                 }
                                 Data::SwitchPermission { name, enabled } => {
                                     // Keep this branch scoped to privacy mode rollback.
@@ -1827,7 +1854,12 @@ pub fn elevate_portable(_id: i32) {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    feature = "flutter",
+    feature = "everydesk"
+))]
 #[inline]
 pub fn handle_incoming_voice_call(id: i32, accept: bool) {
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
@@ -1837,7 +1869,12 @@ pub fn handle_incoming_voice_call(id: i32, accept: bool) {
     };
 }
 
-#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    feature = "flutter",
+    feature = "everydesk"
+))]
 #[inline]
 pub fn close_voice_call(id: i32) {
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
@@ -1941,6 +1978,96 @@ mod tests {
                 _ => panic!("unexpected data"),
             }
         });
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[derive(Clone, Default)]
+    struct RecordSpy(std::sync::Arc<std::sync::Mutex<Vec<(i32, bool)>>>);
+
+    #[cfg(feature = "everydesk")]
+    impl InvokeUiCM for RecordSpy {
+        fn add_connection(&self, _client: &Client) {}
+        fn remove_connection(&self, _id: i32, _close: bool) {}
+        fn new_message(&self, _id: i32, _text: String) {}
+        fn change_theme(&self, _dark: String) {}
+        fn change_language(&self) {}
+        fn show_elevation(&self, _show: bool) {}
+        fn update_voice_call_state(&self, _client: &Client) {}
+        fn file_transfer_log(&self, _action: &str, _log: &str) {}
+        fn record_status(&self, id: i32, recording: bool) {
+            self.0.lock().unwrap().push((id, recording));
+        }
+    }
+
+    /// The CM keeps the controller's recording state per client and forwards it to the UI;
+    /// unknown connections are ignored.
+    #[test]
+    #[cfg(feature = "everydesk")]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_receives_record_status() {
+        let spy = RecordSpy::default();
+        let cm = ConnectionManager {
+            ui_handler: spy.clone(),
+        };
+        let id = 987_654;
+        let (tx, _rx) = unbounded_channel();
+        cm.add_connection(
+            id,
+            false,
+            false,
+            false,
+            String::new(),
+            "rec-peer".to_owned(),
+            "rec".to_owned(),
+            String::new(),
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            tx,
+        );
+        let peer_recording = || CLIENTS.read().unwrap().get(&id).map(|c| c.peer_recording);
+        assert_eq!(peer_recording(), Some(false));
+        cm.record_status(id, true);
+        assert_eq!(peer_recording(), Some(true));
+        cm.record_status(id, false);
+        assert_eq!(peer_recording(), Some(false));
+        cm.record_status(id + 1, true);
+        assert_eq!(*spy.0.lock().unwrap(), vec![(id, true), (id, false)]);
+        cm.remove_connection(id, true);
+    }
+
+    /// The voice-call answer/hang-up helpers are available to the EveryDesk CM; unknown
+    /// connections are a no-op.
+    #[test]
+    #[cfg(feature = "everydesk")]
+    fn voice_call_helpers_open_to_everydesk() {
+        let accept: fn(i32, bool) = handle_incoming_voice_call;
+        let close: fn(i32) = close_voice_call;
+        accept(-424_242, true);
+        close(-424_242);
+    }
+
+    #[test]
+    #[cfg(feature = "everydesk")]
+    fn record_status_data_round_trips() {
+        let s = serde_json::to_string(&Data::RecordStatus {
+            conn_id: 3,
+            recording: true,
+        })
+        .unwrap();
+        match serde_json::from_str::<Data>(&s).unwrap() {
+            Data::RecordStatus { conn_id, recording } => {
+                assert_eq!((conn_id, recording), (3, true));
+            }
+            _ => panic!("unexpected data"),
+        }
     }
 
     /// Tests that symlink creation works on this platform.
