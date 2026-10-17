@@ -333,6 +333,19 @@ pub fn session_send_chat(text: String) -> Result<(), String> {
     Ok(())
 }
 
+/// "Voz" in the pill: `start` asks the host for a voice call (`session:voice` waiting, then
+/// on or off), `!start` ends or cancels it (`session:voice` off).
+#[tauri::command]
+pub fn session_voice(start: bool) -> Result<(), String> {
+    let s = require_session()?;
+    if start {
+        s.request_voice_call();
+    } else {
+        s.close_voice_call();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

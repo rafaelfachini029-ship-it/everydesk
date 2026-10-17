@@ -28,6 +28,8 @@
   import FileTrail from './FileTrail.svelte'
   import MorePanel from './MorePanel.svelte'
   import ChatPanel from './ChatPanel.svelte'
+  import VoiceDot from './VoiceDot.svelte'
+  import VoiceTool from './VoiceTool.svelte'
   import { VIEW_ONLY_FILES, filesAllowed, qualityLabel } from './more.ts'
   import type { Contact } from '../policy.ts'
   import { currentDisplay, dispatchJobs, displayList, extras, jobs, pickAndSend, quality, switchDisplay } from '../session'
@@ -167,7 +169,7 @@
           {:else}
             <span class="who code t-num">{peerId}</span>
           {/if}
-          <span class="voice" role="img" aria-label="Voz desligada"></span>
+          <VoiceDot />
         {/snippet}
 
         <div class="group" role="group" aria-label="Monitores">
@@ -220,6 +222,7 @@
           <span class="sr-only">Qualidade {level}{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
         </span>
 
+        <VoiceTool {onreturn} onhint={show} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
         <ChatPanel active={expanded} {onreturn} who={name ?? peerId} onattention={(on) => (on ? ((expanded = shown = true), hideTimer.hold()) : hideTimer.release())} />
         <MorePanel active={expanded} {onreturn} />
         <span class="rule" aria-hidden="true"></span>
@@ -366,12 +369,6 @@
   .who.code {
     font-size: var(--fs-label);
     color: var(--text-muted);
-  }
-  .voice {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    border: 1.5px solid var(--line-strong);
   }
 
   .group {

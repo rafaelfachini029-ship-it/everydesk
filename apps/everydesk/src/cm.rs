@@ -16,6 +16,9 @@
 //! `cm:chat {conn_id, text, at, mine: false}` (a chat message from the controller `conn_id`;
 //! `at` = unix ms on receipt). The last `CHAT_KEEP` messages of each connection, both ways,
 //! come back in `cm_pending` (`chats`); `cm_send_chat` answers.
+//! `cm:voice {conn_id, incoming, active}` (the controller `conn_id` asks for a voice call
+//! (`incoming`), the call is on (`active`), or neither (refused/ended)). Calls that are asking
+//! or on come back in `cm_pending` (`voices`); `cm_voice_answer` / `cm_voice_close` answer.
 
 use hbb_common::config::Config;
 use librustdesk::ui_cm_interface::{self, Client, ConnectionManager, InvokeUiCM};
@@ -129,6 +132,27 @@ pub struct CmState {
     reconfirms: BTreeMap<i32, (Reconfirm, Instant)>,
     elevation: Elevation,
     chats: BTreeMap<i32, VecDeque<CmChat>>,
+    voices: BTreeMap<i32, CmVoice>,
+}
+
+/// `cm:voice`, and one entry of `CmSnapshot::voices`. Both false: no call (refused, ended).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CmVoice {
+    pub conn_id: i32,
+    /// The controller asks for a voice call; nobody answered yet.
+    pub incoming: bool,
+    /// The call is on: this machine's microphone goes to the controller.
+    pub active: bool,
+}
+
+impl CmVoice {
+    pub fn of(client: &Client) -> Self {
+        Self {
+            conn_id: client.id,
+            incoming: client.incoming_voice_call,
+            active: client.in_voice_call,
+        }
+    }
 }
 
 /// Chat messages kept per connection for `cm_pending` hydration.
@@ -173,6 +197,8 @@ pub struct CmSnapshot {
     pub reconfirms: Vec<ReconfirmSnapshot>,
     /// Recent chat messages (both ways), per connection in order, `CHAT_KEEP` at most each.
     pub chats: Vec<CmChat>,
+    /// Voice calls asking or on (never both false).
+    pub voices: Vec<CmVoice>,
 }
 
 impl CmState {
@@ -234,6 +260,16 @@ impl CmState {
         self.identities.remove(&conn_id);
         self.reconfirms.remove(&conn_id);
         self.chats.remove(&conn_id);
+        self.voices.remove(&conn_id);
+    }
+
+    /// The voice call state of a connection (dropped when neither asking nor on).
+    pub fn voice(&mut self, v: CmVoice) {
+        if v.incoming || v.active {
+            self.voices.insert(v.conn_id, v);
+        } else {
+            self.voices.remove(&v.conn_id);
+        }
     }
 
     /// Keeps a chat message (the oldest of the connection goes past `CHAT_KEEP`).
@@ -267,6 +303,7 @@ impl CmState {
                 })
                 .collect(),
             chats: self.chats.values().flatten().cloned().collect(),
+            voices: self.voices.values().copied().collect(),
         }
     }
 }
@@ -434,7 +471,7 @@ impl InvokeUiCM for TauriCM {
         }
     }
 
-    // TODO etapa 3/4: theme, language, voice call, file transfer log.
+    // TODO etapa 3/4: theme, language, file transfer log.
     fn new_message(&self, id: i32, text: String) {
         let m = CmChat {
             conn_id: id,
@@ -459,7 +496,13 @@ impl InvokeUiCM for TauriCM {
         }
         self.emit("cm:elevation", ev);
     }
-    fn update_voice_call_state(&self, _client: &Client) {}
+    // Called with the engine's client table locked: no `ui_cm_interface` call from here.
+    fn update_voice_call_state(&self, client: &Client) {
+        let v = CmVoice::of(client);
+        log::info!("everydesk: voice #{} incoming={} active={}", v.conn_id, v.incoming, v.active);
+        with_state(|s| s.voice(v));
+        self.emit("cm:voice", v);
+    }
     fn file_transfer_log(&self, _action: &str, _log: &str) {}
 
     fn reconfirm(&self, conn_id: i32, ring_secs: u32) {
@@ -643,6 +686,20 @@ pub fn cm_send_chat(conn_id: i32, text: String) -> Result<(), String> {
         })
     });
     Ok(())
+}
+
+/// "Aceitar" / "Recusar" on the voice card. The engine answers with `cm:voice` (on, or off).
+#[tauri::command]
+pub fn cm_voice_answer(conn_id: i32, accept: bool) {
+    log::info!("everydesk: voice answer #{conn_id} -> {accept}");
+    ui_cm_interface::handle_incoming_voice_call(conn_id, accept);
+}
+
+/// "Encerrar voz": hangs up the call of `conn_id`; `cm:voice` (off) follows.
+#[tauri::command]
+pub fn cm_voice_close(conn_id: i32) {
+    log::info!("everydesk: voice close #{conn_id}");
+    ui_cm_interface::close_voice_call(conn_id);
 }
 
 #[cfg(test)]
@@ -844,6 +901,30 @@ mod tests {
         s.ring(Reconfirm { conn_id: 1, ring_secs: 60 }, t0);
         s.remove(1);
         assert_eq!(s.snapshot(t0), CmSnapshot::default());
+    }
+
+    #[test]
+    fn voice_calls_are_hydrated_and_cleared() {
+        let mut s = CmState::default();
+        let v = |conn_id, incoming, active| CmVoice { conn_id, incoming, active };
+        s.voice(v(1, true, false));
+        s.voice(v(2, false, true));
+        let snap = s.snapshot(Instant::now());
+        assert_eq!(snap.voices, vec![v(1, true, false), v(2, false, true)]);
+        assert_eq!(
+            serde_json::to_value(&snap).unwrap()["voices"][0],
+            serde_json::json!({"conn_id": 1, "incoming": true, "active": false})
+        );
+        // Refused / ended: gone.
+        s.voice(v(1, false, false));
+        s.remove(2);
+        assert_eq!(s.snapshot(Instant::now()), CmSnapshot::default());
+    }
+
+    #[test]
+    fn voice_event_serializes_for_the_ui() {
+        let v = serde_json::to_value(CmVoice { conn_id: 3, incoming: false, active: true }).unwrap();
+        assert_eq!(v, serde_json::json!({"conn_id": 3, "incoming": false, "active": true}));
     }
 
     #[test]

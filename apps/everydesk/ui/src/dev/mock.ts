@@ -54,6 +54,23 @@ mockIPC(
       case 'session_send_chat':
       case 'cm_send_chat':
         return null
+      // Voz (/#voz, /#voz-host): the host answers after a moment; hanging up works.
+      case 'session_voice':
+        if ((args as { start: boolean }).start) {
+          setTimeout(() => emit('session:voice', { state: 'waiting', reason: null }), 50)
+          if (location.hash === '#voz') setTimeout(() => emit('session:voice', { state: 'on', reason: null }), 900)
+          // /#voz-recusa: the host refuses (the engine gives no reason).
+          if (location.hash === '#voz-recusa') setTimeout(() => emit('session:voice', { state: 'off', reason: '' }), 1500)
+        } else setTimeout(() => emit('session:voice', { state: 'off', reason: 'Closed manually by the peer' }), 50)
+        return null
+      case 'cm_voice_answer': {
+        const { connId, accept } = args as { connId: number; accept: boolean }
+        setTimeout(() => emit('cm:voice', { conn_id: connId, incoming: false, active: accept }), 300)
+        return null
+      }
+      case 'cm_voice_close':
+        setTimeout(() => emit('cm:voice', { conn_id: (args as { connId: number }).connId, incoming: false, active: false }), 100)
+        return null
       case 'session_connect':
         connecting((args as { frames: Channel<ArrayBuffer> }).frames)
         return null
@@ -78,7 +95,7 @@ mockIPC(
         return {
           pending: [],
           connected:
-            location.hash === '#conectado' || location.hash === '#conversa-host'
+            location.hash === '#conectado' || location.hash === '#conversa-host' || location.hash === '#voz-host'
               ? [
                   { conn_id: 1, peer_id: 'agua-lua-7', name: 'Mãe' },
                   { conn_id: 2, peer_id: 'pedra-gaviao-90', name: '' },
@@ -95,6 +112,8 @@ mockIPC(
                   { conn_id: 1, text: 'Já estou olhando, mãe.', at: Date.now() - 180e3, mine: true },
                 ]
               : [],
+          // /#voz-host: a call with Mãe is on; the other session asks for one (below).
+          voices: location.hash === '#voz-host' ? [{ conn_id: 1, incoming: false, active: true }] : [],
         }
       default:
         return null
@@ -123,7 +142,7 @@ if (location.hash === '#claro') {
 // /#aviso and /#senha-sessao: a session, then a notice / a password prompt over it (the
 // overlay is a modal dialog that owns the keyboard).
 const flow = location.hash.slice(1)
-const sessionFlow = flow === 'conversa' || flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
+const sessionFlow = flow === 'voz' || flow === 'voz-recusa' || flow === 'conversa' || flow === 'mais' || flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao' || flow === 'arquivos'
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
   const box = (kind: string, title: string, text: string) => emit('session:msgbox', { kind, title, text })
@@ -178,6 +197,12 @@ function connecting(frames: Channel<ArrayBuffer>) {
         f.value = 'Achei. Já'
         f.dispatchEvent(new Event('input', { bubbles: true }))
       })
+    }
+    // Voz (controller): the Voz tool is clicked, then the pill opens. /#voz: "chamando…", then
+    // on (the voice dot lights). /#voz-recusa: the host refuses; the note comes down.
+    if (flow === 'voz' || flow === 'voz-recusa') {
+      at(1000, () => document.querySelector<HTMLButtonElement>('.voicetool .tool')?.click())
+      at(1500, () => document.querySelector<HTMLElement>('.dock .pill')?.focus())
     }
     if (flow === 'senha-sessao') at(1500, () => box('re-input-password', 'Digite a senha de novo', 'A senha mudou na outra máquina.'))
   }
@@ -236,7 +261,10 @@ function fakeFrame(w: number, h: number): ArrayBuffer {
 if (flow === 'conversa-host')
   setTimeout(() => emit('cm:chat', { conn_id: 1, text: 'Ela voltou a imprimir! Obrigada ❤', at: Date.now(), mine: false }), 2000)
 
-if (['conversa', 'busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
+// Voz (host): the unnamed session asks for a voice call.
+if (flow === 'voz-host') setTimeout(() => emit('cm:voice', { conn_id: 2, incoming: true, active: false }), 1200)
+
+if (['voz', 'voz-recusa', 'conversa', 'busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao', 'arquivos', 'mais'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return
