@@ -4,6 +4,10 @@
  * Rules the tokens encode:
  *  - one accent only (--accent): online status, connect button, connection pulse, time ring;
  *  - --text-muted never drops below 4.5:1 on --bg or --surface-2 (tests/tokens.test.ts);
+ *  - --line-strong is the edge of a control (field, select, ghost button, hollow dot): it is
+ *    opaque and >= 3:1 on --bg, --surface and --surface-2 (WCAG 1.4.11); --line stays the
+ *    quiet decorative divider;
+ *  - --warn is the amber of an unverified identity, >= 4.5:1 on every surface;
  *  - --ring is the keyboard focus outline, deliberately NOT the accent;
  *  - dark is the default, [data-theme=light] overrides colours only.
  * Colour tokens checked by tests stay opaque hex.
@@ -17,7 +21,7 @@
   --surface-2: #161c28;
   --surface-glass: rgb(14 18 27 / 0.78);
   --line: rgb(238 242 248 / 0.1);
-  --line-strong: rgb(238 242 248 / 0.22);
+  --line-strong: #5e687c;
 
   --text: #eef2f8;
   --text-muted: #8c97ab;
@@ -30,6 +34,7 @@
   --ring: #c9d4e6;
   --danger: #ff7a7a;
   --danger-soft: rgb(255 122 122 / 0.12);
+  --warn: #f2c46d;
 
   --shadow-float: 0 18px 48px rgb(0 0 0 / 0.55), 0 2px 6px rgb(0 0 0 / 0.4);
 }
@@ -42,7 +47,7 @@
   --surface-2: #e4e9f0;
   --surface-glass: rgb(255 255 255 / 0.82);
   --line: rgb(10 14 22 / 0.1);
-  --line-strong: rgb(10 14 22 / 0.24);
+  --line-strong: #7b8494;
 
   --text: #0a0e16;
   --text-muted: #4a5468;
@@ -55,6 +60,7 @@
   --ring: #1b2333;
   --danger: #b42323;
   --danger-soft: rgb(180 35 35 / 0.08);
+  --warn: #8a5300;
 
   --shadow-float: 0 18px 48px rgb(16 24 40 / 0.16), 0 2px 6px rgb(16 24 40 / 0.08);
 }

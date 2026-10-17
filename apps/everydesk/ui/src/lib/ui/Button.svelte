@@ -1,25 +1,29 @@
 <!--
   Button.
   Props:
-    variant?: 'primary' | 'ghost' | 'danger' = 'ghost'
+    variant?: 'primary' | 'neutral' | 'ghost' | 'danger' = 'ghost'
       primary is the accent ("Conectar") — use at most one per screen.
+      neutral is a filled default without the accent: the safe choice when the accent would
+      push toward a risk (e.g. "Recusar" on a card whose key does not match).
     size?: 'md' | 'lg' = 'md'
-    loading?: boolean — keeps the label, shows a travelling line of light (no spinner),
-      sets aria-busy and blocks clicks.
+    loading?: boolean — keeps the label, draws one line of light along the bottom edge that
+      advances once and stays (no loop, no spinner), sets aria-busy and blocks clicks.
     disabled?: boolean
     type?: 'button' | 'submit' = 'button'
     icon?: lucide component shown before the label
     label?: string — accessible name when the button has only an icon
     onclick?: (e: MouseEvent) => void
     children?: Snippet — the visible label
+    ...rest — other attributes for the <button> (aria-expanded, aria-controls, data-*)
 -->
 <script lang="ts">
   import type { ComponentType, Snippet, SvelteComponent } from 'svelte'
+  import type { HTMLButtonAttributes } from 'svelte/elements'
   import type { IconProps } from 'lucide-svelte'
   import Icon from './Icon.svelte'
 
-  interface Props {
-    variant?: 'primary' | 'ghost' | 'danger'
+  interface Props extends Omit<HTMLButtonAttributes, 'type' | 'onclick' | 'children'> {
+    variant?: 'primary' | 'neutral' | 'ghost' | 'danger'
     size?: 'md' | 'lg'
     loading?: boolean
     disabled?: boolean
@@ -39,6 +43,8 @@
     label,
     onclick,
     children,
+    class: extra = '',
+    ...rest
   }: Props = $props()
 
   function click(e: MouseEvent) {
@@ -51,7 +57,8 @@
 </script>
 
 <button
-  class="btn {variant} {size}"
+  {...rest}
+  class="btn {variant} {size} {extra}"
   class:icon-only={!children}
   {type}
   {disabled}
@@ -91,8 +98,9 @@
     padding: 0 var(--space-5);
     font-size: var(--fs-body);
   }
+  /* 64px: level with the Field input it usually sits next to */
   .lg {
-    min-height: 60px;
+    min-height: 64px;
     padding: 0 var(--space-6);
     font-size: var(--fs-lead);
   }
@@ -101,7 +109,7 @@
     padding: 0;
   }
   .icon-only.lg {
-    width: 60px;
+    width: 64px;
     padding: 0;
   }
 
@@ -111,6 +119,14 @@
   }
   .primary:hover:not(:disabled) {
     box-shadow: 0 0 0 6px var(--accent-track), 0 0 32px var(--accent-glow);
+  }
+
+  .neutral {
+    background: var(--text);
+    color: var(--bg);
+  }
+  .neutral:hover:not(:disabled) {
+    box-shadow: 0 0 0 6px var(--surface-2);
   }
 
   .ghost {
@@ -150,30 +166,31 @@
     cursor: progress;
   }
 
-  /* loading: a short line of light runs along the bottom edge */
+  /* loading: one line of light advances along the bottom edge and stays there. It runs
+     once (no loop: a repeating cue would be a spinner, spec §6.2). */
   .trace {
     position: absolute;
     left: 0;
     bottom: 0;
-    width: 40%;
+    width: 100%;
     height: 2px;
     border-radius: 2px;
     background: currentColor;
-    animation: trace 1.2s var(--ease-out) infinite;
+    opacity: 0.6;
+    transform-origin: left center;
+    animation: trace 1.2s var(--ease-out) 1 both;
   }
   @keyframes trace {
     from {
-      transform: translateX(-100%);
+      transform: scaleX(0);
     }
     to {
-      transform: translateX(250%);
+      transform: scaleX(1);
     }
   }
   @media (prefers-reduced-motion: reduce) {
     .trace {
       animation: none;
-      width: 100%;
-      opacity: 0.6;
     }
   }
 </style>

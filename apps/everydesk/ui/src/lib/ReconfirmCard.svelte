@@ -1,7 +1,8 @@
 <script lang="ts">
   // Periodic "still connected?" ring (cm:reconfirm). The session keeps streaming; unanswered,
   // the engine ends it after `ringSecs` and the parent drops this card at 0.
-  // Same card as the access request (cards/RequestCard), different words.
+  // Same card as the access request (cards/RequestCard), different words. "Encerrar" carries
+  // `data-autofocus`: an unattended Enter must never keep a session alive.
   import { remainingSeconds } from './cm'
   import { RECONFIRM_LINE } from './cards/cards'
   import RequestCard from './cards/RequestCard.svelte'
@@ -32,7 +33,7 @@
   {offset}
 >
   {#snippet actions()}
-    <Button variant="danger" onclick={() => onanswer(false)}>Encerrar</Button>
+    <Button variant="danger" data-autofocus onclick={() => onanswer(false)}>Encerrar</Button>
     <Button variant="primary" onclick={() => onanswer(true)}>Manter</Button>
   {/snippet}
 </RequestCard>

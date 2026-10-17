@@ -38,6 +38,40 @@ export function initials(name: string): string {
   return (first + last).toLocaleUpperCase('pt-BR')
 }
 
+/** Stack order in the DOM. Cards are listed farthest from the corner first, so the Tab order
+ *  follows the visual order (top to bottom); `corner` is the index counted from the corner
+ *  (0 = oldest, nearest it), which feeds stackOffset. No `column-reverse` trick. */
+export function stackOrder<T>(items: T[]): { item: T; corner: number }[] {
+  return items.map((item, corner) => ({ item, corner })).reverse()
+}
+
+/** Seconds left at which an unanswered card is announced once more. */
+export const REMIND_AT_SECS = 20
+
+/** Said by the assertive live region when an access request arrives. */
+export function requestAnnouncement(name: string, isFileTransfer: boolean, secs: number): string {
+  return `${name} ${isFileTransfer ? FILES_LINE : INCOMING_LINE}. Aceitar ou recusar: ${secs} segundos. F6 leva ao pedido.`
+}
+
+/** Said when the "still connected?" ring arrives. */
+export function ringAnnouncement(name: string, secs: number): string {
+  return `${name} ${RECONFIRM_LINE} Manter ou encerrar: ${secs} segundos. F6 leva ao pedido.`
+}
+
+/** Said once more when an unanswered card reaches REMIND_AT_SECS. */
+export function reminderAnnouncement(name: string, secs: number): string {
+  return `Faltam ${secs} segundos para responder a ${name}.`
+}
+
+/** Moving the focus to a new card is fine unless the person is typing somewhere (a field, or
+ *  the remote screen, whose keys go to the other machine): then the card only announces
+ *  itself, and F6 brings the focus to it. */
+export function mayTakeFocus(active: { tagName: string; isContentEditable?: boolean } | null): boolean {
+  if (!active) return true
+  if (active.isContentEditable) return false
+  return !['INPUT', 'TEXTAREA', 'SELECT', 'CANVAS'].includes(active.tagName.toUpperCase())
+}
+
 /** Drops the cards whose countdown reached 0 (`ring_secs` for a reconfirm, else 60 s). */
 export function expire<T extends { start: number; ring_secs?: number }>(cards: T[], now: number): T[] {
   return cards.filter((c) => remainingSeconds(c.start, now, c.ring_secs) > 0)

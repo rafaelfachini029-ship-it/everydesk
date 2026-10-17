@@ -18,7 +18,8 @@
 </script>
 
 <section class="badges" aria-label="Acessos a esta máquina" aria-live="polite">
-  {#each $sessions as c (c.conn_id)}
+  <!-- newest first in the DOM (top), oldest nearest the corner: Tab follows the eye -->
+  {#each [...$sessions].reverse() as c (c.conn_id)}
     {@const named = !!c.name?.trim()}
     <div class="badge" title={named ? c.peer_id : undefined}>
       <span class="live" aria-hidden="true"></span>
@@ -38,7 +39,7 @@
     bottom: var(--space-4);
     z-index: 999;
     display: flex;
-    flex-direction: column-reverse;
+    flex-direction: column;
     align-items: flex-start;
     gap: var(--space-2);
     max-width: calc(100vw - 2 * var(--space-4));
@@ -88,8 +89,9 @@
     font-family: var(--font-code);
     font-weight: 500;
   }
+  /* small text stays in the text colour (no small grey text, spec §6.1) */
   .verb {
-    color: var(--text-muted);
+    color: var(--text);
   }
   /* the ghost of a danger button: red text, fills only on hover */
   .badge :global(.btn.danger:not(:hover)) {

@@ -58,4 +58,20 @@ for (const [name, t] of Object.entries(themes)) {
       assert.ok(ratio('--danger', s) >= 4.5, `danger on ${s}`)
     }
   })
+
+  test(`${name}: control edges (--line-strong) >= 3:1 on every surface`, () => {
+    for (const s of ['--bg', '--surface', '--surface-2']) {
+      assert.ok(ratio('--line-strong', s) >= 3, `${s}: ${ratio('--line-strong', s)}`)
+    }
+  })
+
+  test(`${name}: --warn (unverified identity) >= 4.5:1 on every surface`, () => {
+    for (const s of ['--bg', '--surface', '--surface-2']) {
+      assert.ok(ratio('--warn', s) >= 4.5, `${s}: ${ratio('--warn', s)}`)
+    }
+  })
+
+  test(`${name}: --accent on --surface-2 >= 3:1 (ring arc, online dot on a raised card)`, () => {
+    assert.ok(ratio('--accent', '--surface-2') >= 3, `${ratio('--accent', '--surface-2')}`)
+  })
 }

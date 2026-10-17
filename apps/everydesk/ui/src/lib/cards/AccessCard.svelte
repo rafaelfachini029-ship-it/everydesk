@@ -10,6 +10,10 @@
     error?: string — failed accept; the card stays
     busy?: boolean — accept in flight
     onremember(on), onpolicy(key), onreplacekey(on), onaccept(), ondeny()
+  Buttons: normally "Aceitar" is the accent and "Recusar" a ghost. When the key does not match
+  (the loud identity line) the colour must not push toward the risk: "Recusar" becomes the
+  filled neutral default and "Aceitar" a ghost; the red stays on the warning itself.
+  "Recusar" carries `data-autofocus`: the button the focus lands on when the card arrives.
 -->
 <script lang="ts">
   import ShieldCheck from 'lucide-svelte/icons/shield-check'
@@ -62,6 +66,8 @@
 
   const id = $derived(identityLine(identity, name))
   const icons = { ok: ShieldCheck, warn: TriangleAlert, danger: ShieldAlert }
+  /** Someone claims a known code without its key. */
+  const risky = $derived(id.tone === 'danger')
 </script>
 
 <RequestCard
@@ -89,7 +95,7 @@
         {#snippet hint()}
           {#if remember.on}
             <span class="next t-label">
-              <span class="muted">Da próxima vez:</span>
+              <span>Da próxima vez:</span>
               <PolicySelect value={remember.policy} onchange={onpolicy} />
             </span>
           {/if}
@@ -99,7 +105,7 @@
         <Toggle tone="danger" checked={remember.replaceKey} onchange={onreplacekey}>
           Substituir a chave guardada
           {#snippet hint()}
-            <span class="muted t-label">Só se a pessoa confirmou que trocou de computador.</span>
+            <span class="muted t-body">Só se a pessoa confirmou que trocou de computador.</span>
           {/snippet}
         </Toggle>
       {/if}
@@ -109,8 +115,8 @@
   {#if error}<p class="note t-label danger" role="alert">{error}</p>{/if}
 
   {#snippet actions()}
-    <Button onclick={ondeny}>Recusar</Button>
-    <Button variant="primary" loading={busy} onclick={onaccept}>Aceitar</Button>
+    <Button variant={risky ? 'neutral' : 'ghost'} data-autofocus onclick={ondeny}>Recusar</Button>
+    <Button variant={risky ? 'ghost' : 'primary'} loading={busy} onclick={onaccept}>Aceitar</Button>
   {/snippet}
 </RequestCard>
 
@@ -161,14 +167,5 @@
   }
   .danger {
     color: var(--danger);
-  }
-
-  /* warning tone (unverified): amber, local to the request card; >= 4.5:1 on its surfaces */
-  :global(:root),
-  :global([data-theme='dark']) {
-    --warn: #f2c46d;
-  }
-  :global([data-theme='light']) {
-    --warn: #8a5300;
   }
 </style>

@@ -7,10 +7,15 @@
     code?: string — their machine code, shown small in mono
     total: number — seconds of the whole window (60, or ring_secs)
     remaining: number — seconds left; the accent ring around the initials shrinks with it
+      (the ring is the only clock: no separate seconds counter; it reads the time to screen
+      readers as a progressbar)
     offset?: number — px inset from the right edge when cards stack (cards.ts stackOffset)
     children?: Snippet — identity line, "lembrar" controls, error
     actions: Snippet — the two buttons
   Slides in from the corner (--dur-base, --ease-out; 0 ms under reduced motion) and fades out.
+  It is a non-modal alertdialog (name = who, description = what they want); IncomingCard
+  announces it through its live region and moves the focus to the button marked
+  `data-autofocus`.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte'
@@ -37,29 +42,29 @@
   const letters = $derived(initials(name))
 </script>
 
-<section
+<div
   class="card"
+  role="alertdialog"
   style:margin-right="{offset}px"
   aria-labelledby="n-{uid}"
   aria-describedby="l-{uid}"
-  out:fade={{ duration: prefersReducedMotion() ? 0 : DUR.fast }}
+  out:fade|global={{ duration: prefersReducedMotion() ? 0 : DUR.fast }}
 >
   <header>
-    <Ring {total} {remaining} size={76} stroke={3} label="{remaining} segundos para responder">
+    <Ring {total} {remaining} size={76} stroke={3} name="Tempo para responder" label="{remaining} segundos para responder">
       <span class="disc" aria-hidden="true">{letters}</span>
     </Ring>
     <div class="who">
       <h2 id="n-{uid}" class="name">{name}</h2>
       <p id="l-{uid}" class="line t-body">{line}</p>
-      {#if code}<p class="code t-label">código <span class="t-num">{code}</span></p>{/if}
+      {#if code}<p class="code t-body">código <span class="t-num">{code}</span></p>{/if}
     </div>
-    <span class="secs t-num" aria-hidden="true">{remaining}<span class="unit">s</span></span>
   </header>
 
   {#if children}<div class="body">{@render children()}</div>{/if}
 
   <div class="actions">{@render actions()}</div>
-</section>
+</div>
 
 <style>
   .card {
@@ -93,7 +98,7 @@
 
   header {
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto 1fr;
     align-items: center;
     gap: var(--space-4);
   }
@@ -128,18 +133,10 @@
     color: var(--text);
     line-height: var(--lh-snug);
   }
+  /* the code is security information: full text colour, not a muted caption */
   .code {
     margin: 0;
-    color: var(--text-muted);
-  }
-  .secs {
-    align-self: start;
-    color: var(--text-muted);
-    font-size: var(--fs-label);
-    font-variant-numeric: tabular-nums;
-  }
-  .unit {
-    margin-left: 2px;
+    color: var(--text);
   }
 
   .body {

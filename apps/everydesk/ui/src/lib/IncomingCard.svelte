@@ -6,10 +6,16 @@
   // authorized session may get a `cm:reconfirm` ring (ReconfirmCard). `cm:identity` says
   // whether the claimed id/name is backed by a verified key; "lembrar" is never offered for
   // an unverified one, and a known id without its key gets a loud warning.
+  // Accessibility: every new card is said by an assertive live region (mounted before any
+  // card exists) and takes the focus on its safe button (`data-autofocus`: Recusar/Encerrar),
+  // unless the person is typing (cards.ts mayTakeFocus); F6 always brings the focus to the
+  // newest card. When the focused card goes, the focus returns to where it was before.
   import { invoke } from '@tauri-apps/api/core'
   import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-  import { onMount } from 'svelte'
+  import { onMount, tick } from 'svelte'
+  import { DUR } from '../design/motion'
   import {
+    CLICK_APPROVE_TIMEOUT_SECS,
     CM_EVENTS,
     canRemember,
     identityNotice,
@@ -25,7 +31,17 @@
   import { policyFromKey } from './policy'
   import ReconfirmCard from './ReconfirmCard.svelte'
   import AccessCard from './cards/AccessCard.svelte'
-  import { expire, rememberDefault, stackOffset } from './cards/cards'
+  import {
+    REMIND_AT_SECS,
+    expire,
+    mayTakeFocus,
+    reminderAnnouncement,
+    rememberDefault,
+    requestAnnouncement,
+    ringAnnouncement,
+    stackOffset,
+    stackOrder,
+  } from './cards/cards'
   import { applyCm, sessions } from './host/badge'
 
   type Pending = Incoming & { start: number }
@@ -43,6 +59,122 @@
   let remember = $state<Record<number, Remember>>({})
   let rings = $state<Ring[]>([])
   let now = $state(Date.now())
+
+  // ---- the stack: one list, oldest nearest the corner; the DOM lists it top to bottom ----
+  type Item = { key: string; ring: Ring; req?: undefined } | { key: string; req: Pending; ring?: undefined }
+  const items = $derived<Item[]>([
+    ...rings.map((ring) => ({ key: `r${ring.conn_id}`, ring })),
+    ...pending.map((req) => ({ key: `p${req.conn_id}`, req })),
+  ])
+  const ordered = $derived(stackOrder(items))
+
+  // ---- announcements and focus ----
+  let stackEl: HTMLElement | undefined = $state()
+  let announcement = $state('')
+  const announced = new Set<string>()
+  const reminded = new Set<string>()
+  /** Where the focus was before a card took it; it goes back there when the cards are gone. */
+  let returnTo: HTMLElement | null = null
+  /** The focus is in the stack (kept when it vanishes with a removed card). */
+  let focusInside = false
+
+  function say(text: string) {
+    // Clear first so the same words are said again.
+    announcement = ''
+    tick().then(() => (announcement = text))
+  }
+
+  function nameOfItem(i: Item): string {
+    return i.req ? i.req.name || i.req.peer_id : nameOf(i.ring.conn_id)
+  }
+
+  function focusCard(key: string | undefined, force: boolean) {
+    if (!key || !stackEl) return
+    const btn = stackEl.querySelector<HTMLElement>(`[data-card="${key}"] [data-autofocus]`)
+    if (!btn) return
+    const active = document.activeElement as HTMLElement | null
+    if (!force && !mayTakeFocus(active)) return
+    if (!focusInside && active && active !== document.body && !stackEl.contains(active)) returnTo = active
+    btn.focus()
+  }
+
+  // A new card: say it, and take the focus to it when nobody is typing.
+  $effect(() => {
+    const keys = new Set(items.map((i) => i.key))
+    for (const k of [...announced]) {
+      if (!keys.has(k)) {
+        announced.delete(k)
+        reminded.delete(k)
+      }
+    }
+    const fresh = items.filter((i) => !announced.has(i.key))
+    if (!fresh.length) return
+    for (const i of fresh) announced.add(i.key)
+    const last = fresh[fresh.length - 1]
+    const t = Date.now()
+    // Several at once (hydration after a restart): say them all, the newest last.
+    say(
+      fresh
+        .map((i) =>
+          i.req
+            ? requestAnnouncement(nameOfItem(i), i.req.is_file_transfer, remainingSeconds(i.req.start, t))
+            : ringAnnouncement(nameOfItem(i), remainingSeconds(i.ring.start, t, i.ring.ring_secs)),
+        )
+        .join(' '),
+    )
+    tick().then(() => focusCard(last.key, false))
+  })
+
+  // A card left: if the focus went with it, hand it to the next card or back where it was.
+  let count = 0
+  $effect(() => {
+    const n = items.length
+    const shrank = n < count
+    count = n
+    if (!shrank || !focusInside) return
+    setTimeout(() => {
+      const a = document.activeElement
+      if (a && a !== document.body && a.isConnected) return
+      if (ordered.length) focusCard(ordered[0].item.key, true)
+      else {
+        focusInside = false
+        if (returnTo?.isConnected) returnTo.focus()
+        returnTo = null
+      }
+    }, DUR.fast + 50)
+  })
+
+  function onfocusin() {
+    focusInside = true
+  }
+  function onfocusout(e: FocusEvent) {
+    const to = e.relatedTarget as Node | null
+    // null: the window lost focus or the focused card was removed; keep the claim.
+    if (to && !stackEl?.contains(to)) {
+      focusInside = false
+      returnTo = null
+    }
+  }
+
+  function remind(t: number) {
+    for (const i of items) {
+      if (reminded.has(i.key)) continue
+      const total = i.req ? CLICK_APPROVE_TIMEOUT_SECS : i.ring.ring_secs
+      const left = i.req ? remainingSeconds(i.req.start, t) : remainingSeconds(i.ring.start, t, i.ring.ring_secs)
+      if (total > REMIND_AT_SECS && left > 0 && left <= REMIND_AT_SECS) {
+        reminded.add(i.key)
+        say(reminderAnnouncement(nameOfItem(i), left))
+      }
+    }
+  }
+
+  // F6: the keyboard way to the newest card, wherever the focus is (even the remote screen).
+  function onkeydowncapture(e: KeyboardEvent) {
+    if (e.key !== 'F6' || !ordered.length) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    focusCard(ordered[0].item.key, true)
+  }
 
   function addOffer(o: PairOffer) {
     offers = { ...offers, [o.conn_id]: o }
@@ -186,8 +318,11 @@
       // The engine closes an unanswered prompt itself; just drop the card at 0.
       pending = expire(pending, now)
       rings = expire(rings, now)
+      remind(now)
     }, 250)
+    window.addEventListener('keydown', onkeydowncapture, true)
     return () => {
+      window.removeEventListener('keydown', onkeydowncapture, true)
       clearInterval(timer)
       unlisten.forEach((u) => u.then((f) => f()))
     }
@@ -195,44 +330,51 @@
 </script>
 
 <!-- Bottom-right corner. Cards stack upward from the corner (oldest nearest it), each one
-     step further in (stackOffset), so two requests never read as one. -->
-<div class="cm">
-  <div class="stack">
-    {#each rings as r, i (`r${r.conn_id}`)}
-      <ReconfirmCard
-        name={nameOf(r.conn_id)}
-        start={r.start}
-        ringSecs={r.ring_secs}
-        {now}
-        offset={stackOffset(i)}
-        onanswer={(ok) => answerRing(r.conn_id, ok)}
-      />
-    {/each}
-    {#each pending as p, i (`p${p.conn_id}`)}
-      {@const o = offers[p.conn_id]}
-      <AccessCard
-        name={p.name || p.peer_id}
-        code={p.peer_id}
-        isFileTransfer={p.is_file_transfer}
-        remaining={remainingSeconds(p.start, now)}
-        offset={stackOffset(rings.length + i)}
-        identity={identities[p.conn_id]}
-        rememberable={canRemember(identities[p.conn_id], o)}
-        keyChanged={!!o?.key_changed}
-        remember={remember[p.conn_id]}
-        error={errors[p.conn_id]}
-        busy={busy[p.conn_id]}
-        onremember={(on) => setRemember(p.conn_id, { on, touched: true, replaceKey: false })}
-        onpolicy={(policy) => setRemember(p.conn_id, { policy })}
-        onreplacekey={(replaceKey) => setRemember(p.conn_id, { replaceKey })}
-        onaccept={() => accept(p)}
-        ondeny={() => close(p.conn_id)}
-      />
-    {/each}
-  </div>
+     step further in (stackOffset), so two requests never read as one. The DOM lists them top
+     to bottom (stackOrder), so Tab follows what the eye sees. -->
+<div class="sr-only" aria-live="assertive" aria-atomic="true">{announcement}</div>
+<div class="cm" bind:this={stackEl} {onfocusin} {onfocusout}>
+  {#each ordered as { item, corner } (item.key)}
+    <div class="slot" data-card={item.key}>
+      {#if item.ring}
+        {@const r = item.ring}
+        <ReconfirmCard
+          name={nameOf(r.conn_id)}
+          start={r.start}
+          ringSecs={r.ring_secs}
+          {now}
+          offset={stackOffset(corner)}
+          onanswer={(ok) => answerRing(r.conn_id, ok)}
+        />
+      {:else if item.req}
+        {@const p = item.req}
+        {@const o = offers[p.conn_id]}
+        <AccessCard
+          name={p.name || p.peer_id}
+          code={p.peer_id}
+          isFileTransfer={p.is_file_transfer}
+          remaining={remainingSeconds(p.start, now)}
+          offset={stackOffset(corner)}
+          identity={identities[p.conn_id]}
+          rememberable={canRemember(identities[p.conn_id], o)}
+          keyChanged={!!o?.key_changed}
+          remember={remember[p.conn_id]}
+          error={errors[p.conn_id]}
+          busy={busy[p.conn_id]}
+          onremember={(on) => setRemember(p.conn_id, { on, touched: true, replaceKey: false })}
+          onpolicy={(policy) => setRemember(p.conn_id, { policy })}
+          onreplacekey={(replaceKey) => setRemember(p.conn_id, { replaceKey })}
+          onaccept={() => accept(p)}
+          ondeny={() => close(p.conn_id)}
+        />
+      {/if}
+    </div>
+  {/each}
 </div>
 
 <style>
+  /* The scroll container takes the pointer (so its scrollbar works when many cards pile
+     up); it is only as large as the cards, so it covers nothing else. */
   .cm {
     position: fixed;
     right: var(--space-4);
@@ -244,16 +386,14 @@
     gap: var(--space-3);
     max-height: calc(100vh - 2 * var(--space-4));
     overflow-y: auto;
+    overscroll-behavior: contain;
     font-family: var(--font-ui);
-    pointer-events: none;
   }
-  .stack {
+  .cm:empty {
+    display: none;
+  }
+  .slot {
     display: flex;
-    flex-direction: column-reverse;
-    align-items: flex-end;
-    gap: var(--space-3);
-  }
-  .stack > :global(*) {
-    pointer-events: auto;
+    justify-content: flex-end;
   }
 </style>

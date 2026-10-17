@@ -5,8 +5,14 @@ import {
   INCOMING_LINE,
   FILES_LINE,
   RECONFIRM_LINE,
+  REMIND_AT_SECS,
   STACK_STEP_PX,
   expire,
+  mayTakeFocus,
+  reminderAnnouncement,
+  requestAnnouncement,
+  ringAnnouncement,
+  stackOrder,
   identityLine,
   initials,
   rememberDefault,
@@ -96,13 +102,35 @@ test('expire: a card leaves when its countdown reaches 0', () => {
   assert.deepEqual(expire(cards, t0 + 90_000), [])
 })
 
-test('warning tone keeps >= 4.5:1 on the card surfaces of both themes', async () => {
-  const { readFileSync } = await import('node:fs')
-  const { contrast } = await import('../src/design/contrast.ts')
-  const css = readFileSync(new URL('../src/lib/cards/AccessCard.svelte', import.meta.url), 'utf8')
-  const warns = [...css.matchAll(/--warn:\s*(#[0-9a-fA-F]{6})/g)].map((m) => m[1])
-  assert.equal(warns.length, 2)
-  const [dark, light] = warns
-  for (const bg of ['#07090f', '#0e121b', '#161c28']) assert.ok(contrast(dark, bg) >= 4.5, bg)
-  for (const bg of ['#f2f4f8', '#ffffff', '#e4e9f0']) assert.ok(contrast(light, bg) >= 4.5, bg)
+// The --warn contrast lives with the other tokens now (tests/tokens.test.ts).
+
+test('stackOrder: farthest card first in the DOM (Tab follows the eye), offsets from the corner', () => {
+  const order = stackOrder(['oldest', 'middle', 'newest'])
+  assert.deepEqual(
+    order.map((o) => o.item),
+    ['newest', 'middle', 'oldest'],
+  )
+  assert.deepEqual(
+    order.map((o) => stackOffset(o.corner)),
+    [2 * STACK_STEP_PX, STACK_STEP_PX, 0],
+  )
+  assert.deepEqual(stackOrder([]), [])
+})
+
+test('announcements say who, what and how long', () => {
+  assert.equal(
+    requestAnnouncement('Marta', false, 60),
+    `Marta ${INCOMING_LINE}. Aceitar ou recusar: 60 segundos. F6 leva ao pedido.`,
+  )
+  assert.match(requestAnnouncement('Ana', true, 60), new RegExp(FILES_LINE))
+  assert.equal(ringAnnouncement('Marta', 30), `Marta ${RECONFIRM_LINE} Manter ou encerrar: 30 segundos. F6 leva ao pedido.`)
+  assert.equal(reminderAnnouncement('Marta', REMIND_AT_SECS), 'Faltam 20 segundos para responder a Marta.')
+})
+
+test('a new card takes the focus only when nobody is typing', () => {
+  assert.equal(mayTakeFocus(null), true)
+  assert.equal(mayTakeFocus({ tagName: 'BODY' }), true)
+  assert.equal(mayTakeFocus({ tagName: 'BUTTON' }), true)
+  for (const t of ['INPUT', 'textarea', 'SELECT', 'CANVAS']) assert.equal(mayTakeFocus({ tagName: t }), false, t)
+  assert.equal(mayTakeFocus({ tagName: 'DIV', isContentEditable: true }), false)
 })

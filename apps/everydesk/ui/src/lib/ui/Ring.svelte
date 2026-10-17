@@ -5,7 +5,10 @@
     remaining: number — time left, same unit; the accent arc shrinks with it
     size?: number = 56 (px)
     stroke?: number = 3 (px)
-    label?: string — accessible text; defaults to "{remaining} segundos restantes"
+    name?: string — accessible name of the timer; defaults to "Tempo restante"
+    label?: string — spoken value (aria-valuetext); defaults to "{remaining} segundos restantes"
+  Exposed as a progressbar: aria-valuemin 0, aria-valuemax total, aria-valuenow the whole
+  seconds left, so a screen reader can read the time on demand.
     children?: Snippet — centre content; defaults to the remaining number
 -->
 <script lang="ts">
@@ -17,10 +20,11 @@
     remaining: number
     size?: number
     stroke?: number
+    name?: string
     label?: string
     children?: Snippet
   }
-  let { total, remaining, size = 56, stroke = 3, label, children }: Props = $props()
+  let { total, remaining, size = 56, stroke = 3, name = 'Tempo restante', label, children }: Props = $props()
 
   const g = $derived(ringGeometry(size, stroke))
   const offset = $derived(ringDashOffset(total, remaining, g.c))
@@ -31,8 +35,12 @@
   class="ring"
   style:width="{size}px"
   style:height="{size}px"
-  role="img"
-  aria-label={label ?? `${shown} segundos restantes`}
+  role="progressbar"
+  aria-label={name}
+  aria-valuemin={0}
+  aria-valuemax={total}
+  aria-valuenow={shown}
+  aria-valuetext={label ?? `${shown} segundos restantes`}
 >
   <svg width={size} height={size} viewBox="0 0 {size} {size}" aria-hidden="true">
     <circle class="track" cx={g.center} cy={g.center} r={g.r} stroke-width={stroke} />
