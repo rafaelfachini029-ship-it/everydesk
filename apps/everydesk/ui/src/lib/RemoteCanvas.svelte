@@ -4,6 +4,7 @@
   import { DUR, EASE, animate } from '../design/motion.ts'
   import type { ConnEvent } from './connecting/connecting.ts'
   import SessionPill from './session/SessionPill.svelte'
+  import DropZone from './session/DropZone.svelte'
   import {
     ALT_IDLE,
     altTapReducer,
@@ -390,6 +391,7 @@
       onreturn={() => canvas.focus()}
       onenter={releaseKeys}
     />
+    <DropZone {peerId} onactivity={() => pill?.peek()} />
   {/if}
 
   {#if revealed && msg}

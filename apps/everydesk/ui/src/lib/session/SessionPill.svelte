@@ -23,6 +23,7 @@
   import Button from '../ui/Button.svelte'
   import Icon from '../ui/Icon.svelte'
   import Pill from '../ui/Pill.svelte'
+  import FileTrail from './FileTrail.svelte'
   import type { Contact } from '../policy.ts'
   import { currentDisplay, displayList, quality, switchDisplay } from '../session'
   import { createHideTimer, formatFps, formatLatency, type Rect } from './sessionPill.ts'
@@ -217,6 +218,7 @@
   <span id="{uid}-soon" hidden>{SOON}</span>
   <span id="{uid}-one" hidden>A outra máquina tem um monitor só</span>
   <p class="hint" class:on={expanded && hint} aria-hidden="true">{hint ?? ''}</p>
+  <FileTrail />
 </div>
 
 <style>

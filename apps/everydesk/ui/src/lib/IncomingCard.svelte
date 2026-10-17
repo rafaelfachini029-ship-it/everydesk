@@ -1,6 +1,7 @@
 <script lang="ts">
   // Accessed side: accept/deny prompts (60 s, then the engine closes the connection with
-  // "Pedido não respondido em 60 s") and a "Conectado" indicator while a session is authorized.
+  // "Pedido não respondido em 60 s"). The authorized sessions go to the `sessions` store
+  // (host/badge.ts), which ConnectedBadge shows; these listeners are its only source.
   // A prompt with a `cm:pair_offer` can also remember the controller under a policy; an
   // authorized session may get a `cm:reconfirm` ring (ReconfirmCard). `cm:identity` says
   // whether the claimed id/name is backed by a verified key; "lembrar" is never offered for
@@ -25,7 +26,7 @@
   import ReconfirmCard from './ReconfirmCard.svelte'
   import AccessCard from './cards/AccessCard.svelte'
   import { expire, rememberDefault, stackOffset } from './cards/cards'
-  import Button from './ui/Button.svelte'
+  import { applyCm, sessions } from './host/badge'
 
   type Pending = Incoming & { start: number }
   type Ring = Reconfirm & { start: number }
@@ -34,7 +35,6 @@
   type Remember = { on: boolean; policy: string; replaceKey: boolean; touched: boolean }
 
   let pending = $state<Pending[]>([])
-  let connected = $state<Connected[]>([])
   let offers = $state<Record<number, PairOffer>>({})
   let identities = $state<Record<number, Identity>>({})
   /** Per-prompt error of a failed accept (the card stays up). */
@@ -91,7 +91,7 @@
 
   function drop(connId: number) {
     pending = pending.filter((p) => p.conn_id !== connId)
-    connected = connected.filter((c) => c.conn_id !== connId)
+    sessions.update((l) => applyCm(l, { type: 'removed', conn_id: connId }))
     rings = rings.filter((r) => r.conn_id !== connId)
     forget(connId)
   }
@@ -122,8 +122,8 @@
     pending = pending.filter((x) => x.conn_id !== p.conn_id)
     forget(p.conn_id)
     // `authorize` does not echo `cm:connected`; a vanished connection still sends `cm:removed`.
-    if (!connected.some((c) => c.conn_id === p.conn_id)) {
-      connected = [...connected, { conn_id: p.conn_id, peer_id: p.peer_id, name: p.name }]
+    if (!$sessions.some((c) => c.conn_id === p.conn_id)) {
+      sessions.update((l) => applyCm(l, { type: 'connected', session: { conn_id: p.conn_id, peer_id: p.peer_id, name: p.name } }))
     }
   }
 
@@ -138,7 +138,7 @@
   }
 
   function nameOf(connId: number): string {
-    const c = connected.find((x) => x.conn_id === connId)
+    const c = $sessions.find((x) => x.conn_id === connId)
     return c ? c.name || c.peer_id : `Sessão ${connId}`
   }
 
@@ -151,7 +151,7 @@
       listen<Connected>(CM_EVENTS.connected, (e) => {
         const c = e.payload
         pending = pending.filter((x) => x.conn_id !== c.conn_id)
-        connected = [...connected.filter((x) => x.conn_id !== c.conn_id), c]
+        sessions.update((l) => applyCm(l, { type: 'connected', session: c }))
       }),
       listen<Removed>(CM_EVENTS.removed, (e) => drop(e.payload.conn_id)),
       listen<PairOffer>(CM_EVENTS.pairOffer, (e) => addOffer(e.payload)),
@@ -172,7 +172,7 @@
           }
         }
         for (const c of snap.connected) {
-          if (!connected.some((x) => x.conn_id === c.conn_id)) connected = [...connected, c]
+          if (!$sessions.some((x) => x.conn_id === c.conn_id)) sessions.update((l) => applyCm(l, { type: 'connected', session: c }))
         }
         for (const i of snap.identities) if (!identities[i.conn_id]) addIdentity(i)
         for (const o of snap.offers) if (!offers[o.conn_id]) addOffer(o)
@@ -230,12 +230,6 @@
       />
     {/each}
   </div>
-  {#each connected as c (c.conn_id)}
-    <div class="connected t-label">
-      <span>Conectado: <strong>{c.name || c.peer_id}</strong></span>
-      <Button variant="danger" onclick={() => close(c.conn_id)}>Encerrar</Button>
-    </div>
-  {/each}
 </div>
 
 <style>
@@ -259,24 +253,7 @@
     align-items: flex-end;
     gap: var(--space-3);
   }
-  .stack > :global(*),
-  .connected {
+  .stack > :global(*) {
     pointer-events: auto;
-  }
-  .connected {
-    display: flex;
-    align-items: center;
-    gap: var(--space-4);
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-5);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-pill);
-    background: var(--surface-glass);
-    -webkit-backdrop-filter: blur(20px);
-    backdrop-filter: blur(20px);
-    box-shadow: var(--shadow-float);
-    color: var(--text);
-  }
-  .connected :global(.btn.danger:not(:hover)) {
-    background: transparent;
   }
 </style>

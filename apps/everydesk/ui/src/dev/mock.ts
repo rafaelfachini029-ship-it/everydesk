@@ -27,7 +27,20 @@ mockIPC(
         connecting((args as { frames: Channel<ArrayBuffer> }).frames)
         return null
       case 'cm_pending':
-        return { pending: [], connected: [], offers: [], identities: [], reconfirms: [] }
+        // /#conectado: two authorized sessions on this machine (ConnectedBadge).
+        return {
+          pending: [],
+          connected:
+            location.hash === '#conectado'
+              ? [
+                  { conn_id: 1, peer_id: 'agua-lua-7', name: 'Mãe' },
+                  { conn_id: 2, peer_id: 'pedra-gaviao-90', name: '' },
+                ]
+              : [],
+          offers: [],
+          identities: [],
+          reconfirms: [],
+        }
       default:
         return null
     }
