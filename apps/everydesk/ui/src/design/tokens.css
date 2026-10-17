@@ -1,0 +1,93 @@
+/*
+ * EveryDesk design tokens — "Painel de comando noturno" (spec §6).
+ *
+ * Rules the tokens encode:
+ *  - one accent only (--accent): online status, connect button, connection pulse, time ring;
+ *  - --text-muted never drops below 4.5:1 on --bg or --surface-2 (tests/tokens.test.ts);
+ *  - --ring is the keyboard focus outline, deliberately NOT the accent;
+ *  - dark is the default, [data-theme=light] overrides colours only.
+ * Colour tokens checked by tests stay opaque hex.
+ */
+:root,
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #07090f;
+  --surface: #0e121b;
+  --surface-2: #161c28;
+  --surface-glass: rgb(14 18 27 / 0.78);
+  --line: rgb(238 242 248 / 0.1);
+  --line-strong: rgb(238 242 248 / 0.22);
+
+  --text: #eef2f8;
+  --text-muted: #8c97ab;
+
+  --accent: #2ef2c2;
+  --on-accent: #03140f;
+  --accent-glow: rgb(46 242 194 / 0.35);
+  --accent-track: rgb(46 242 194 / 0.16);
+
+  --ring: #c9d4e6;
+  --danger: #ff7a7a;
+  --danger-soft: rgb(255 122 122 / 0.12);
+
+  --shadow-float: 0 18px 48px rgb(0 0 0 / 0.55), 0 2px 6px rgb(0 0 0 / 0.4);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f2f4f8;
+  --surface: #ffffff;
+  --surface-2: #e4e9f0;
+  --surface-glass: rgb(255 255 255 / 0.82);
+  --line: rgb(10 14 22 / 0.1);
+  --line-strong: rgb(10 14 22 / 0.24);
+
+  --text: #0a0e16;
+  --text-muted: #4a5468;
+
+  --accent: #007a62;
+  --on-accent: #ffffff;
+  --accent-glow: rgb(0 122 98 / 0.28);
+  --accent-track: rgb(0 122 98 / 0.16);
+
+  --ring: #1b2333;
+  --danger: #b42323;
+  --danger-soft: rgb(180 35 35 / 0.08);
+
+  --shadow-float: 0 18px 48px rgb(16 24 40 / 0.16), 0 2px 6px rgb(16 24 40 / 0.08);
+}
+
+:root {
+  /* spacing: 4-based, generous */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 999px;
+
+  /* motion: short, purposeful (spec §6.1) */
+  --dur-fast: 150ms;
+  --dur-base: 250ms;
+  --dur-slow: 400ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}

@@ -12,6 +12,9 @@
   let password = $state('')
   let remote = $state<{ peerId: string; password: string } | null>(null)
   let lastError = $state('')
+  // Hidden design review page (/#gallery); loaded lazily so its styles never touch this screen.
+  let gallery = $state(location.hash.startsWith('#gallery'))
+  onMount(() => window.addEventListener('hashchange', () => (gallery = location.hash.startsWith('#gallery'))))
 
   async function refresh() {
     try {
@@ -48,7 +51,9 @@
   }
 </script>
 
-{#if remote}
+{#if gallery}
+  {#await import('./routes/Gallery.svelte') then m}<m.default />{/await}
+{:else if remote}
   <RemoteCanvas peerId={remote.peerId} password={remote.password} {onclosed} />
 {:else}
   <main>
