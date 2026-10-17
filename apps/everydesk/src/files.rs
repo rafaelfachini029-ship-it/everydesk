@@ -9,8 +9,11 @@
 //!
 //! Commands: `session_send_files(paths)`, `session_pick_and_send()`, `session_cancel_job(id)`,
 //! `session_override_answer(id, file_num, overwrite, remember)`.
-//! Event (new): `session:job_added {id, name, to, total}` before each job starts, so the trail
-//! has a name and a size before the first `session:job` progress.
+//! Events (new): `session:job_added {id, name, to, total, preparing}` — first right after the
+//! drop (`preparing: true`, so the trail shows "Preparando…" while the destination is found),
+//! then again with the destination and size just before the job starts; `session:job_failed
+//! {id, message}` — that file was not sent (a name the host cannot store); `session:jobs_dropped
+//! {ids}` — the whole drop was refused (the command's error says why).
 
 use crate::commands;
 use crate::session::TauriSessionHandler;
@@ -25,6 +28,8 @@ use tauri::{AppHandle, Listener};
 pub const ERR_NO_HOME: &str = "A outra máquina ainda não informou a pasta de destino.";
 pub const ERR_DENIED: &str = "A outra máquina não permite receber arquivos.";
 pub const ERR_NO_SESSION: &str = "Nenhuma sessão aberta.";
+pub const ERR_NO_ANSWER: &str = "A outra máquina não respondeu. Tente de novo.";
+pub const ERR_BAD_NAME: &str = "Nome de arquivo inválido para a outra máquina.";
 /// How long a send waits for the host's home listing (sent once, right after login).
 const HOME_WAIT: Duration = Duration::from_secs(3);
 /// How long one Desktop/Downloads probe waits. No answer at all = the host ignores file
@@ -73,6 +78,42 @@ pub fn file_name_of(path: &str) -> Option<String> {
         .filter(|n| !n.is_empty())
 }
 
+/// The name `name` gets on the host, or `ERR_BAD_NAME`. A file name is only a name: a path
+/// separator of the host (or `.`/`..`) would let a dropped file land outside the destination
+/// folder, so it is refused everywhere. On a Windows host also refused: `: * ? " < > |`, control
+/// characters and reserved device names (`CON`, `NUL.txt`, `COM1`...); trailing dots and
+/// spaces are dropped, as Windows itself would.
+pub fn host_safe_name(name: &str, platform: &str) -> Result<String, &'static str> {
+    let windows = platform == "Windows";
+    let name = if windows { name.trim_end_matches(['.', ' ']) } else { name };
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+        return Err(ERR_BAD_NAME);
+    }
+    if windows {
+        if name.chars().any(|c| c.is_control() || "\\:*?\"<>|".contains(c)) {
+            return Err(ERR_BAD_NAME);
+        }
+        let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        if reserved {
+            return Err(ERR_BAD_NAME);
+        }
+    } else if name.contains('\\') && platform.is_empty() {
+        // unknown platform: be as strict as Windows about separators
+        return Err(ERR_BAD_NAME);
+    }
+    Ok(name.to_owned())
+}
+
+/// A probe's outcome: listed (true), the host's read-dir failed (false), or no answer at all
+/// (None) — then the host is not answering, which is not the same as refusing.
+pub fn probe_result(answer: Option<bool>) -> Result<bool, &'static str> {
+    answer.ok_or(ERR_NO_ANSWER)
+}
+
 /// Where a send stands before it may start.
 #[derive(Debug, PartialEq)]
 pub enum HomeCheck {
@@ -112,8 +153,10 @@ pub enum Seen {
 }
 
 /// Does this event answer the probe of `probe_path`? Some(true): the host listed it (it
-/// exists). Some(false): the host's read-dir failed (the engine reports it as job 0, file -1;
-/// real jobs start at 1). None: unrelated.
+/// exists). Some(false): the host's read-dir failed. The engine's failure does not echo the
+/// path (`fs::new_error(0, err, -1)` carries only id 0 and file_num -1; real jobs start at 1),
+/// so any read-dir failure while a probe is pending answers it; probes are serialized
+/// (`RESOLVING`) and this app issues no other id-0 file action. None: unrelated.
 pub fn probe_answer(probe_path: &str, seen: &Seen) -> Option<bool> {
     match seen {
         Seen::Folder(f) if !f.is_local && !f.only_count && f.path == probe_path => Some(true),
@@ -222,14 +265,25 @@ fn probe(s: &S, path: String) -> Result<bool, String> {
     let (tx, rx) = mpsc::channel();
     STATE.lock().unwrap().probe = Some(Probe { path: path.clone(), tx });
     s.read_remote_dir(path, false);
-    let res = rx.recv_timeout(PROBE_WAIT);
+    let res = rx.recv_timeout(PROBE_WAIT).ok();
     STATE.lock().unwrap().probe = None;
-    match res {
-        Ok(found) => Ok(found),
-        Err(_) => {
-            log::warn!("everydesk: host did not answer the folder probe");
-            Err(ERR_DENIED.to_owned())
+    if res.is_none() {
+        log::warn!("everydesk: host did not answer the folder probe");
+    }
+    probe_result(res).map_err(str::to_owned)
+}
+
+/// Ids the person cancelled while they were still "Preparando…": never started.
+static CANCELLED: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+fn take_cancelled(id: i32) -> bool {
+    let mut c = CANCELLED.lock().unwrap();
+    match c.iter().position(|&x| x == id) {
+        Some(i) => {
+            c.swap_remove(i);
+            true
         }
+        None => false,
     }
 }
 
@@ -246,6 +300,8 @@ fn resolve(gen: u64, s: &S) -> Result<Dest, String> {
     let home = wait_home(s)?;
     let platform = s.get_platform(true);
     let sep = if platform == "Windows" { '\\' } else { '/' };
+    // Answered probes (found or not) are cached for the session below; a timeout is not, so
+    // the next drop asks again ("Tente de novo").
     let has_desktop = probe(s, join(&home, sep, "Desktop"))?;
     let has_downloads = !has_desktop && probe(s, join(&home, sep, "Downloads"))?;
     let dest = Dest { home, sep, platform, has_desktop, has_downloads };
@@ -265,31 +321,67 @@ struct JobAdded {
     name: String,
     to: String,
     total: u64,
+    preparing: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct JobFailed {
+    id: i32,
+    message: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+struct JobsDropped {
+    ids: Vec<i32>,
 }
 
 fn send_paths(paths: Vec<String>) -> Result<Vec<i32>, String> {
     let (gen, s) = commands::current().ok_or_else(|| ERR_NO_SESSION.to_owned())?;
-    let paths: Vec<(String, String)> = paths
-        .into_iter()
-        .filter_map(|p| file_name_of(&p).map(|n| (p, n)))
-        .collect();
-    if paths.is_empty() {
-        return Ok(vec![]);
-    }
-    if !file_enabled(&s) {
-        return Err(ERR_DENIED.to_owned());
-    }
-    let d = resolve(gen, &s)?;
-    let mut ids = Vec::with_capacity(paths.len());
-    for (path, name) in paths {
+    let platform = s.get_platform(true);
+    let mut ids = Vec::new();
+    // (id, local path, name on the host)
+    let mut jobs: Vec<(i32, String, String)> = Vec::new();
+    // A row per file at once: finding the destination can take a few seconds.
+    for path in paths {
+        let Some(local) = file_name_of(&path) else { continue };
         let id = s.get_next_job_id();
+        ids.push(id);
+        s.ui_handler.emit(
+            "session:job_added",
+            JobAdded { id, name: local.clone(), to: String::new(), total: 0, preparing: true },
+        );
+        match host_safe_name(&local, &platform) {
+            Ok(name) => jobs.push((id, path, name)),
+            Err(message) => {
+                log::warn!("everydesk: job {id} refused: unsafe name for {platform}");
+                s.ui_handler.emit("session:job_failed", JobFailed { id, message });
+            }
+        }
+    }
+    if jobs.is_empty() {
+        return Ok(ids);
+    }
+    let dropped = |e: String| {
+        let ids = jobs.iter().map(|j| j.0).collect();
+        s.ui_handler.emit("session:jobs_dropped", JobsDropped { ids });
+        e
+    };
+    if !file_enabled(&s) {
+        return Err(dropped(ERR_DENIED.to_owned()));
+    }
+    let d = resolve(gen, &s).map_err(dropped)?;
+    for (id, path, name) in jobs {
+        if take_cancelled(id) {
+            continue;
+        }
         let to = remote_target(&d.home, d.sep, &d.platform, d.has_desktop, d.has_downloads, &name);
         let total = local_size(Path::new(&path));
-        s.ui_handler
-            .emit("session:job_added", JobAdded { id, name, to: to.clone(), total });
+        s.ui_handler.emit(
+            "session:job_added",
+            JobAdded { id, name, to: to.clone(), total, preparing: false },
+        );
         log::info!("everydesk: send job {id} ({total} bytes)");
         s.send_files(id, 0, path, to, 0, false, false);
-        ids.push(id);
     }
     Ok(ids)
 }
@@ -331,6 +423,14 @@ pub async fn session_pick_and_send(app: AppHandle) -> Result<Vec<i32>, String> {
 
 #[tauri::command]
 pub fn session_cancel_job(id: i32) {
+    // still preparing: the send loop skips it (bounded: the loop takes it, or it is one stale id)
+    {
+        let mut c = CANCELLED.lock().unwrap();
+        if c.len() >= 256 {
+            c.clear();
+        }
+        c.push(id);
+    }
     if let Some((_, s)) = commands::current() {
         s.cancel_job(id);
     }
@@ -401,6 +501,46 @@ mod tests {
         assert_eq!(home_check(false, None, false), HomeCheck::Fail(ERR_DENIED));
         assert_eq!(home_check(false, Some("/h".into()), false), HomeCheck::Fail(ERR_DENIED));
         assert_eq!(ERR_DENIED, "A outra máquina não permite receber arquivos.");
+    }
+
+    #[test]
+    fn safe_names_on_windows() {
+        let w = |n| host_safe_name(n, "Windows");
+        assert_eq!(w("normal.txt"), Ok("normal.txt".into()));
+        assert_eq!(w(r"..\..\x.dll"), Err(ERR_BAD_NAME));
+        assert_eq!(w("a:b"), Err(ERR_BAD_NAME));
+        for bad in ["a/b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b", "a\u{1}b", "..", ".", "", " . "] {
+            assert_eq!(w(bad), Err(ERR_BAD_NAME), "{bad:?}");
+        }
+        for dev in ["CON", "con.txt", "Nul", "PRN.log", "aux", "COM1", "lpt9.txt", "COM1 .txt"] {
+            assert_eq!(w(dev), Err(ERR_BAD_NAME), "{dev:?}");
+        }
+        for ok in ["COM0", "COM10", "LPT", "console.txt", "nulo.txt", "relatório 2026.pdf"] {
+            assert!(w(ok).is_ok(), "{ok:?}");
+        }
+        assert_eq!(w("nota. . "), Ok("nota".into())); // trailing dots/spaces dropped
+    }
+
+    #[test]
+    fn safe_names_elsewhere() {
+        let m = |n| host_safe_name(n, "Mac OS");
+        assert_eq!(m("normal.txt"), Ok("normal.txt".into()));
+        assert_eq!(m("a:b"), Ok("a:b".into())); // legal on macOS/Linux
+        assert_eq!(m("../x"), Err(ERR_BAD_NAME));
+        assert_eq!(m(".."), Err(ERR_BAD_NAME));
+        assert_eq!(m("a\0b"), Err(ERR_BAD_NAME));
+        assert_eq!(host_safe_name("a/b", "Linux"), Err(ERR_BAD_NAME));
+        // unknown host platform: no backslash either
+        assert_eq!(host_safe_name(r"..\x", ""), Err(ERR_BAD_NAME));
+    }
+
+    #[test]
+    fn probe_timeout_is_not_a_refusal() {
+        assert_eq!(probe_result(Some(true)), Ok(true));
+        assert_eq!(probe_result(Some(false)), Ok(false));
+        assert_eq!(probe_result(None), Err(ERR_NO_ANSWER));
+        assert_ne!(ERR_NO_ANSWER, ERR_DENIED);
+        assert_eq!(ERR_NO_ANSWER, "A outra máquina não respondeu. Tente de novo.");
     }
 
     #[test]

@@ -147,3 +147,29 @@ test('speed reads "1,2 MB/s"', () => {
   assert.equal(formatSpeed(0), '')
   assert.equal(formatSpeed(Number.NaN), '')
 })
+
+test('a drop shows "Preparando…" at once, then sends', () => {
+  let s = jobsReducer(EMPTY, { type: 'added', ev: { id: 4, name: 'a.txt', to: '', total: 0, preparing: true } })
+  assert.equal(job(s, 4).status, 'preparing')
+  assert.equal(jobLine(job(s, 4)), 'Preparando…')
+  assert.ok(trailBusy(s))
+  assert.equal(overall(s.jobs), 0)
+  s = jobsReducer(s, added(4, 'a.txt', 200))
+  assert.equal(job(s, 4).status, 'sending')
+  assert.equal(job(s, 4).total, 200)
+  // a progress that beats the second job_added also starts it
+  const t = run([{ type: 'added', ev: { id: 6, name: 'b', to: '', total: 0, preparing: true } }, ev(6, 'progress', 5)])
+  assert.equal(job(t, 6).status, 'sending')
+})
+
+test('a refused drop removes its rows; a bad name fails only that row, with the app message', () => {
+  const prep = (id: number): JobsAction => ({ type: 'added', ev: { id, name: `f${id}`, to: '', total: 0, preparing: true } })
+  let s = run([prep(1), prep(2), prep(3)])
+  s = jobsReducer(s, { type: 'failed', id: 2, message: 'Nome de arquivo inválido para a outra máquina.', at: 1 })
+  assert.equal(job(s, 2).status, 'error')
+  assert.equal(jobLine(job(s, 2)), 'Nome de arquivo inválido para a outra máquina.')
+  s = jobsReducer(s, { type: 'dropped', ids: [1, 3] })
+  assert.deepEqual(s.jobs.map((j) => j.id), [2])
+  s = jobsReducer(s, { type: 'refused', message: 'A outra máquina não respondeu. Tente de novo.', at: 1 })
+  assert.equal(s.note, 'A outra máquina não respondeu. Tente de novo.')
+})

@@ -300,6 +300,8 @@ export const EVENTS = {
   job: 'session:job',
   override: 'session:override',
   jobsCleared: 'session:jobs_cleared',
+  jobFailed: 'session:job_failed',
+  jobsDropped: 'session:jobs_dropped',
   permission: 'session:permission',
 } as const
 

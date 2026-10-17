@@ -2,7 +2,9 @@
  * File-send jobs shown in the pill's trail (spec §5.2, §6.2 moment 5). A pure reducer over the
  * session events, so `node --test` exercises it without DOM or Tauri.
  *
- * Events: `session:job_added {id,name,to,total}` (before a job starts), `session:job
+ * Events: `session:job_added {id,name,to,total,preparing}` (right after the drop with
+ * `preparing`, then again when the job starts), `session:job_failed {id,message}` (that file
+ * was not sent), `session:jobs_dropped {ids}` (the drop was refused), `session:job
  * {id,file_num,kind,speed,finished,err}`, `session:override {id,file_num,to,is_upload,
  * is_identical}`, `session:jobs_cleared`, `session:permission {name,value}`.
  */
@@ -13,7 +15,8 @@ export const DONE_FADE_MS = 3000
 /** A note (refused send) stays this long. */
 export const NOTE_MS = 6000
 
-export type JobStatus = 'sending' | 'ask' | 'done' | 'error'
+/** `preparing`: the destination on the host is still being found. */
+export type JobStatus = 'preparing' | 'sending' | 'ask' | 'done' | 'error'
 
 export interface Job {
   id: number
@@ -60,6 +63,7 @@ export interface JobAdded {
   name: string
   to: string
   total: number
+  preparing?: boolean
 }
 
 export type JobsAction =
@@ -68,13 +72,15 @@ export type JobsAction =
   | { type: 'override'; ev: OverrideEvent }
   | { type: 'answered'; id: number; overwrite: boolean }
   | { type: 'cancel'; id: number }
+  | { type: 'failed'; id: number; message: string; at: number }
+  | { type: 'dropped'; ids: number[] }
   | { type: 'cleared' }
   | { type: 'permission'; name: string; value: boolean }
   | { type: 'refused'; message: string; at: number }
   | { type: 'tick'; now: number }
 
-function newJob(id: number, name = 'Arquivo', total = 0): Job {
-  return { id, name, total, sent: 0, speed: 0, status: 'sending', err: null, ask: null, kept: 0, endedAt: null }
+function newJob(id: number, name = 'Arquivo', total = 0, status: JobStatus = 'sending'): Job {
+  return { id, name, total, sent: 0, speed: 0, status, err: null, ask: null, kept: 0, endedAt: null }
 }
 
 const patch = (s: JobsState, id: number, f: (j: Job) => Job): JobsState => ({
@@ -96,8 +102,15 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
   switch (a.type) {
     case 'added': {
       const { id, name, total } = a.ev
-      if (s.jobs.some((j) => j.id === id)) return patch(s, id, (j) => ({ ...j, name, total }))
-      return { ...s, jobs: [...s.jobs, newJob(id, name, total)] }
+      const preparing = a.ev.preparing === true
+      if (s.jobs.some((j) => j.id === id))
+        return patch(s, id, (j) => ({
+          ...j,
+          name,
+          total: preparing ? j.total : total,
+          status: j.status === 'preparing' && !preparing ? 'sending' : j.status,
+        }))
+      return { ...s, jobs: [...s.jobs, newJob(id, name, total, preparing ? 'preparing' : 'sending')] }
     }
     case 'job': {
       const ev = a.ev
@@ -113,7 +126,12 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
         switch (ev.kind) {
           case 'progress':
             // a pending question holds this job only: it stays asking until answered
-            return { ...j, sent: Math.max(j.sent, ev.finished), speed: ev.speed }
+            return {
+              ...j,
+              status: j.status === 'preparing' ? 'sending' : j.status,
+              sent: Math.max(j.sent, ev.finished),
+              speed: ev.speed,
+            }
           case 'done':
             return { ...j, status: 'done', ask: null, speed: 0, endedAt: a.at }
           case 'error':
@@ -134,6 +152,13 @@ export function jobsReducer(s: JobsState, a: JobsAction): JobsState {
       )
     case 'cancel':
       return { ...s, jobs: s.jobs.filter((j) => j.id !== a.id) }
+    case 'failed': {
+      // the app's own reason (already in Portuguese), shown as is
+      const st = s.jobs.some((j) => j.id === a.id) ? s : { ...s, jobs: [...s.jobs, newJob(a.id)] }
+      return patch(st, a.id, (j) => ({ ...j, status: 'error', ask: null, speed: 0, err: a.message, endedAt: a.at }))
+    }
+    case 'dropped':
+      return { ...s, jobs: s.jobs.filter((j) => !a.ids.includes(j.id)) }
     case 'cleared':
       return { ...s, jobs: [] }
     case 'permission':
@@ -160,7 +185,7 @@ export function percent(j: Pick<Job, 'sent' | 'total' | 'status'>): number | nul
 
 /** Progress of everything still moving (the light along the pill), 0..1, or null when idle. */
 export function overall(jobs: Job[]): number | null {
-  const live = jobs.filter((j) => j.status === 'sending' || j.status === 'ask')
+  const live = jobs.filter((j) => j.status === 'preparing' || j.status === 'sending' || j.status === 'ask')
   if (live.length === 0) return null
   const total = live.reduce((n, j) => n + j.total, 0)
   if (total <= 0) return 0
@@ -179,6 +204,8 @@ export function formatSpeed(bps: number): string {
 /** The row's status line. */
 export function jobLine(j: Job): string {
   switch (j.status) {
+    case 'preparing':
+      return 'Preparando…'
     case 'ask':
       return 'Já existe. Substituir?'
     case 'error':

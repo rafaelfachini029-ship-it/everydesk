@@ -5,7 +5,7 @@
   (Sim / Não / Sempre); only that job waits. Finished rows fade after 3 s; errors stay until
   dismissed. A refused send (permission off, no destination) is a one-line note.
   Owns the session's file events (`session:job_added`, `session:job`, `session:override`,
-  `session:jobs_cleared`, `session:permission`) and feeds `jobs` (session.ts → jobs.ts).
+  `session:job_failed`, `session:jobs_dropped`, `session:jobs_cleared`, `session:permission`) and feeds `jobs` (session.ts → jobs.ts).
   Lives in the dock's flow, so the dead zone covers the rows (their buttons never reach
   the remote screen).
   Props:
@@ -29,6 +29,10 @@
       listen<JobAdded>(EVENTS.jobAdded, (e) => dispatchJobs({ type: 'added', ev: e.payload })),
       listen<JobEvent>(EVENTS.job, (e) => dispatchJobs({ type: 'job', ev: e.payload, at: Date.now() })),
       listen<OverrideEvent>(EVENTS.override, (e) => dispatchJobs({ type: 'override', ev: e.payload })),
+      listen<{ id: number; message: string }>(EVENTS.jobFailed, (e) =>
+        dispatchJobs({ type: 'failed', id: e.payload.id, message: e.payload.message, at: Date.now() }),
+      ),
+      listen<{ ids: number[] }>(EVENTS.jobsDropped, (e) => dispatchJobs({ type: 'dropped', ids: e.payload.ids })),
       listen(EVENTS.jobsCleared, () => dispatchJobs({ type: 'cleared' })),
       listen<{ name: string; value: boolean }>(EVENTS.permission, (e) =>
         dispatchJobs({ type: 'permission', name: e.payload.name, value: e.payload.value }),
@@ -42,7 +46,7 @@
   })
 
   function dismiss(j: Job) {
-    if (j.status === 'sending' || j.status === 'ask') cancelJob(j.id).catch(() => {})
+    if (j.status === 'preparing' || j.status === 'sending' || j.status === 'ask') cancelJob(j.id).catch(() => {})
     dispatchJobs({ type: 'cancel', id: j.id })
     onreturn()
   }
@@ -53,7 +57,7 @@
     onreturn()
   }
   const closeLabel = (j: Job) =>
-    j.status === 'sending' || j.status === 'ask' ? `Cancelar o envio de ${j.name}` : `Dispensar ${j.name}`
+    j.status === 'preparing' || j.status === 'sending' || j.status === 'ask' ? `Cancelar o envio de ${j.name}` : `Dispensar ${j.name}`
 </script>
 
 {#if $jobs.jobs.length > 0 || $jobs.note}
@@ -141,6 +145,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .row.preparing .line,
   .row.ask .line {
     color: var(--text);
     font-family: var(--font-ui);

@@ -132,7 +132,8 @@ function simulateSend(names: string[], hold?: number): number[] {
   return names.map((name) => {
     const id = nextJob++
     const total = 18e6
-    emit('session:job_added', { id, name, to: `C:\\Users\\mae\\Desktop\\${name}`, total })
+    emit('session:job_added', { id, name, to: '', total: 0, preparing: true })
+    setTimeout(() => emit('session:job_added', { id, name, to: `C:\\Users\\mae\\Desktop\\${name}`, total }), 600)
     let sent = hold === undefined ? 0 : total * (hold - 0.08)
     const t = setInterval(() => {
       sent = Math.min(total, sent + 1.25e6 * 0.4)
