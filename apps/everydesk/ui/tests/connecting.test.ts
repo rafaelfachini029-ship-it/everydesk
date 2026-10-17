@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import {
   REACH,
   arrived,
+  cancellable,
   humanizeMsgbox,
   phaseFor,
   traceOptions,
@@ -128,4 +129,54 @@ test('reduced motion: the trace jumps (duration 0), no travelling spark loop', (
   const full = traceOptions(false)
   assert.ok((full.reach.duration as number) > 0)
   assert.equal(full.spark.iterations, Infinity)
+})
+
+test('the same engine text, read by phase', () => {
+  const nf = 'Não encontrei essa máquina. Confira o código.'
+  const table: [string, 'before-accept' | 'asked' | 'live', string][] = [
+    ['Timeout', 'before-accept', nf],
+    ['Failed to connect via rendezvous server', 'before-accept', nf],
+    ['Timeout', 'asked', 'A outra máquina não respondeu.'],
+    ['Timeout. Se o problema persistir, confira o relógio do computador.', 'asked', 'A outra máquina não respondeu.'],
+    ['Timeout', 'live', 'A conexão caiu.'],
+    ['Closed manually by the peer', 'before-accept', 'A outra máquina recusou.'],
+    ['Closed manually by the peer', 'asked', 'A outra máquina recusou.'],
+    ['Closed manually by the peer', 'live', 'A outra máquina encerrou a conexão.'],
+    ['Conexão encerrada pelo dono da máquina', 'live', 'O dono da máquina encerrou a conexão.'],
+    ['Reconfirmação não respondida em 60 s', 'live', 'O dono da máquina não confirmou a tempo.'],
+    ['Pedido não respondido em 60 s', 'asked', 'A outra máquina não respondeu.'],
+  ]
+  for (const [text, phase, title] of table)
+    assert.equal(humanizeMsgbox('error', text, { phase }).title, title, `${phase}: ${text}`)
+  assert.equal(humanizeMsgbox('error', 'Timeout', { phase: 'live' }).retryable, true)
+})
+
+test('phaseFor reads a timeout after the card went up as silence, not as a wrong code', () => {
+  assert.equal(phaseFor([box('error', 'Timeout')]).message?.title, 'Não encontrei essa máquina. Confira o código.')
+  assert.equal(
+    phaseFor([box('wait-remote-accept-nook'), box('error', 'Timeout')]).message?.title,
+    'A outra máquina não respondeu.',
+  )
+  assert.equal(
+    phaseFor([box('wait-remote-accept-nook'), { type: 'closed', box: { kind: 'error', title: '', text: 'Timeout' } }]).message
+      ?.title,
+    'A outra máquina não respondeu.',
+  )
+})
+
+test('second factor and restarting show a quiet label instead of staying silent', () => {
+  const f = phaseFor([box('input-2fa', '', 'Wrong 2FA Code')])
+  assert.equal(f.name, 'aviso')
+  assert.equal(f.message?.title, 'A outra máquina pede um segundo fator.')
+  const r = phaseFor([box('restarting-show', 'Connection in progress. Please wait.', 'Restarting remote device')])
+  assert.equal(r.name, 'aviso')
+  assert.equal(r.message?.title, 'A outra máquina está reiniciando…')
+  // the generic "Connecting..." variant of that kind is not a restart
+  assert.equal(phaseFor([box('restarting-show', 'Connection in progress. Please wait.', 'Connecting...')]).name, 'procurando')
+  assert.equal(phaseFor([box('restarting', '', 'Restarting remote device'), { type: 'connected' }]).name, 'conectando')
+})
+
+test('cancel applies before the reveal only', () => {
+  for (const p of ['procurando', 'pedindo', 'aviso', 'conectando'] as const) assert.equal(cancellable(p), true, p)
+  for (const p of ['pronto', 'erro', 'senha'] as const) assert.equal(cancellable(p), false, p)
 })

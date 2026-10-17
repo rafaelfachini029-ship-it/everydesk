@@ -15,7 +15,7 @@
   import { invoke } from '@tauri-apps/api/core'
   import { onMount, tick } from 'svelte'
   import { animate, prefersReducedMotion } from '../design/motion.ts'
-  import { REACH, SPARK_MS, arrived, traceOptions, type Phase } from '../lib/connecting/connecting.ts'
+  import { REACH, SPARK_MS, arrived, cancellable, traceOptions, type Phase } from '../lib/connecting/connecting.ts'
   import type { Contact } from '../lib/policy.ts'
   import Button from '../lib/ui/Button.svelte'
   import Field from '../lib/ui/Field.svelte'
@@ -54,7 +54,6 @@
   const len = $derived(Math.max(vertical ? h : w, 1))
   const end = $derived(vertical ? { x: 12, y: len } : { x: len, y: 12 })
   const failed = $derived(phase.name === 'erro')
-  const busy = $derived(phase.name !== 'erro' && phase.name !== 'senha')
 
   // How far the light reaches; frozen where it was when an attempt fails.
   let reach = $state(0)
@@ -64,12 +63,14 @@
 
   // Lit part: animate from wherever it is to the new reach (instant under reduced motion).
   let shown = 0
+  let reachAnim: Animation | undefined
   $effect(() => {
     if (!lit) return
     const to = reach
     const from = shown
     shown = to
-    animate(lit, [{ strokeDashoffset: 100 - from * 100 }, { strokeDashoffset: 100 - to * 100 }], traceOptions().reach)
+    reachAnim?.cancel()
+    reachAnim = animate(lit, [{ strokeDashoffset: 100 - from * 100 }, { strokeDashoffset: 100 - to * 100 }], traceOptions().reach)
   })
 
   // Spark: a short bright dash travelling the lit part, looping while waiting. Not drawn at
@@ -103,6 +104,7 @@
       pedindo: 'Pedindo permissão',
       conectando: 'Conectando',
       pronto: 'Conectando',
+      aviso: phase.message?.title ?? '',
       senha: phase.message?.title ?? '',
       erro: phase.message?.title ?? '',
     }[phase.name],
@@ -121,7 +123,8 @@
   }
 
   function keydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && busy) oncancel()
+    // Not during the reveal (pronto): the session that just opened must stay open.
+    if (e.key === 'Escape' && cancellable(phase.name)) oncancel()
   }
 </script>
 
@@ -191,7 +194,7 @@
           {#if phase.message?.retryable}<Button variant="primary" onclick={onretry}>Tentar de novo</Button>{/if}
           <Button onclick={onback}>Voltar</Button>
         {:else}
-          <Button onclick={oncancel}>Cancelar</Button>
+          <Button disabled={!cancellable(phase.name)} onclick={oncancel}>Cancelar</Button>
         {/if}
       </div>
     {/if}

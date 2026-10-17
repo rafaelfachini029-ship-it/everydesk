@@ -22,8 +22,19 @@ export const UNKNOWN = 'Não deu certo. Tente de novo.'
 
 const say = (title: string, body = '', retryable = true): Humanized => ({ title, body, retryable })
 
+/** Where the attempt was when the message came: the same engine text means different
+ *  things. "Timeout" before anyone answered is a code that leads nowhere; after the other
+ *  side showed its card it is a silence; in a live session it is a dropped link. */
+export interface MsgContext {
+  phase: 'before-accept' | 'asked' | 'live'
+}
+
 /** `kind`/`text` of a `session:msgbox` (the English title adds nothing and is ignored). */
-export function humanizeMsgbox(kind: string, text: string): Humanized {
+export function humanizeMsgbox(
+  kind: string,
+  text: string,
+  ctx: MsgContext = { phase: 'before-accept' },
+): Humanized {
   if (kind === 'input-password') return say(ASK_PASSWORD, '', false)
   if (kind === 're-input-password') return say(ASK_PASSWORD, 'Essa senha não confere. Digite de novo.', false)
 
@@ -37,12 +48,16 @@ export function humanizeMsgbox(kind: string, text: string): Humanized {
     return say('A outra máquina não respondeu.', 'Ninguém aceitou o pedido do outro lado.')
   if (l.includes('reconfirmação não respondida')) return say('O dono da máquina não confirmou a tempo.')
   if (l.includes('encerrada pelo dono')) return say('O dono da máquina encerrou a conexão.', '', false)
-  if (l.includes('closed manually by the peer')) return say('A outra máquina recusou.')
+  if (l.includes('closed manually by the peer'))
+    return say(ctx.phase === 'live' ? 'A outra máquina encerrou a conexão.' : 'A outra máquina recusou.')
   if (l.includes('aguardando o aplicativo everydesk'))
     return say('A outra máquina ainda está abrindo o EveryDesk.', 'Espere alguns segundos.')
   // No reply from the server or the peer. The engine appends a clock hint to these; a
   // plain not-found never mentions the clock.
-  if (/rendezvous|timeout|timed out|does not exist|não existe/.test(l)) return say(NOT_FOUND)
+  const noReply = /rendezvous|timeout|timed out/.test(l)
+  if (noReply && ctx.phase === 'live') return say('A conexão caiu.')
+  if (noReply && ctx.phase === 'asked') return say('A outra máquina não respondeu.')
+  if (noReply || /does not exist|não existe/.test(l)) return say(NOT_FOUND)
   if (/\boffline\b/.test(l)) return say('A outra máquina está desligada ou sem internet agora.')
   return { ...say(UNKNOWN), detail: t || undefined }
 }
@@ -57,7 +72,11 @@ export type ConnEvent =
   | { type: 'login' }
   | { type: 'closed'; box: MsgBox | null }
 
-export type PhaseName = 'procurando' | 'pedindo' | 'senha' | 'conectando' | 'pronto' | 'erro'
+export type PhaseName = 'procurando' | 'pedindo' | 'aviso' | 'senha' | 'conectando' | 'pronto' | 'erro'
+
+/** Phases where Cancelar/Escape apply (not during the reveal, nor once it failed). */
+export const cancellable = (p: PhaseName) =>
+  p === 'procurando' || p === 'pedindo' || p === 'aviso' || p === 'conectando'
 
 export interface Phase {
   name: PhaseName
@@ -75,22 +94,24 @@ export function phaseFor(events: readonly ConnEvent[]): Phase {
   let asked = false
   let connected = false
   let password: Humanized | null = null
+  let notice: Humanized | null = null
   let error: Humanized | null = null
+  // Once the other side answered (its card is up, or the login went through), silence is
+  // "não respondeu", no longer "não encontrei".
+  const ctx = (): MsgContext => ({ phase: asked || connected ? 'asked' : 'before-accept' })
   for (const e of events) {
     switch (e.type) {
       case 'frame':
         return { name: 'pronto' }
       case 'displays':
       case 'connected':
-        connected = true
-        password = null
-        break
       case 'login':
-        password = null
         connected = true
+        password = null
+        notice = null
         break
       case 'closed':
-        error ??= e.box && isError(e.box.kind) ? humanizeMsgbox(e.box.kind, boxText(e.box)) : say(UNKNOWN)
+        error ??= e.box && isError(e.box.kind) ? humanizeMsgbox(e.box.kind, boxText(e.box), ctx()) : say(UNKNOWN)
         break
       case 'msgbox': {
         const k = e.box.kind
@@ -99,7 +120,10 @@ export function phaseFor(events: readonly ConnEvent[]): Phase {
           connected = false
         } else if (k.startsWith('wait-remote-accept')) asked = true
         else if (k === 'success') connected = true
-        else if (isError(k)) error ??= humanizeMsgbox(k, boxText(e.box))
+        else if (k === 'input-2fa') notice = say('A outra máquina pede um segundo fator.', '', false)
+        else if (k.startsWith('restarting') && /restart/i.test(e.box.title))
+          notice = say('A outra máquina está reiniciando…', '', false)
+        else if (isError(k)) error ??= humanizeMsgbox(k, boxText(e.box), ctx())
       }
     }
   }
@@ -107,6 +131,7 @@ export function phaseFor(events: readonly ConnEvent[]): Phase {
   if (error) return { name: 'erro', message: error }
   if (password) return { name: 'senha', message: password }
   if (connected) return { name: 'conectando' }
+  if (notice) return { name: 'aviso', message: notice }
   return { name: asked ? 'pedindo' : 'procurando' }
 }
 
@@ -119,6 +144,7 @@ export function phaseFor(events: readonly ConnEvent[]): Phase {
 export const REACH: Record<Exclude<PhaseName, 'erro'>, number> = {
   procurando: 0.4,
   pedindo: 1,
+  aviso: 1,
   senha: 1,
   conectando: 1,
   pronto: 1,

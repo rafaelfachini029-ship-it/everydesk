@@ -39,7 +39,7 @@
       return
     }
     remote = null
-    if (last && last.kind.includes('error')) lastError = humanizeMsgbox(last.kind, last.text || last.title).title
+    if (last && last.kind.includes('error')) lastError = humanizeMsgbox(last.kind, last.text || last.title, { phase: 'live' }).title
   }
 
   function retry() {
