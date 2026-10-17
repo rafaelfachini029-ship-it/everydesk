@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { fold, humanError, resolveTarget, suggest } from '../src/lib/home/go.ts'
+import { AMBIGUOUS_NAME, NO_CODE, fold, resolveTarget, suggest } from '../src/lib/home/go.ts'
 import { normalizeCode } from '../src/lib/session.ts'
 import type { Contact } from '../src/lib/policy.ts'
 import { shouldCollapse } from '../src/lib/home/reveal.ts'
@@ -71,18 +71,21 @@ test('online first, at most six', () => {
 })
 
 test('resolve: exact code, single suggestion, or the typed code', () => {
-  assert.equal(resolveTarget(book, 'Azul Tigre 42'), 'azul-tigre-42')
-  assert.equal(resolveTarget(book, 'mãe'), 'agua-lua-7')
-  assert.equal(resolveTarget(book, 'Roxo Gato 9'), 'roxo-gato-9')
-  assert.equal(resolveTarget(book, '   '), '')
+  assert.deepEqual(resolveTarget(book, 'Azul Tigre 42'), { id: 'azul-tigre-42' })
+  assert.deepEqual(resolveTarget(book, 'mãe'), { id: 'agua-lua-7' })
+  assert.deepEqual(resolveTarget(book, 'Roxo Gato 9'), { id: 'roxo-gato-9' })
+  assert.deepEqual(resolveTarget(book, '   '), { error: NO_CODE })
 })
 
-test('errors read as plain Portuguese', () => {
-  assert.match(humanError('ID does not exist'), /não existe/)
-  assert.match(humanError('Remote desktop is offline'), /desligada|internet/)
-  assert.match(humanError('Connection timeout'), /não respondeu/)
-  assert.match(humanError('Wrong Password'), /senha/i)
-  assert.match(humanError('something weird 0x42'), /Não foi possível conectar/)
+test('resolve: a name shared by two or more contacts asks for the code', () => {
+  const twins: Contact[] = [...book, c('roxo-gato-9', 'Mãe'), c('rosa-sapo-3', 'Ana Silva')]
+  assert.deepEqual(resolveTarget(twins, 'mãe'), { error: AMBIGUOUS_NAME })
+  assert.equal(AMBIGUOUS_NAME, 'Mais de um contato com esse nome. Use o código.')
+  // "silva" matches João Silva and Ana Silva: never sent as the code "silva"
+  assert.deepEqual(resolveTarget(twins, 'silva'), { error: AMBIGUOUS_NAME })
+  // an exact code still wins, and an unknown code still goes as typed
+  assert.deepEqual(resolveTarget(twins, 'roxo gato 9'), { id: 'roxo-gato-9' })
+  assert.deepEqual(resolveTarget(twins, 'Lilás Boi 5'), { id: normalizeCode('Lilás Boi 5') })
 })
 
 test('cards stay open while focus or a pointer press is inside', () => {

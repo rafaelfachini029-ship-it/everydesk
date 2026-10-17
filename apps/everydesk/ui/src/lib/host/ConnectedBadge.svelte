@@ -11,9 +11,24 @@
   import Button from '../ui/Button.svelte'
   import { applyCm, badgeLabel, sessions } from './badge.ts'
 
+  /** conn_id → why "Encerrar" failed; the badge stays (the access is still on). */
+  let failed = $state<Record<number, string>>({})
+
+  /** Close first; the badge goes only once the engine confirms, so a failed close never
+   *  hides an access that is still on. */
   async function end(connId: number) {
+    try {
+      await invoke('cm_close', { connId })
+    } catch {
+      failed = { ...failed, [connId]: 'Não consegui encerrar. Tente de novo.' }
+      return
+    }
+    if (connId in failed) {
+      const rest = { ...failed }
+      delete rest[connId]
+      failed = rest
+    }
     sessions.update((l) => applyCm(l, { type: 'removed', conn_id: connId }))
-    await invoke('cm_close', { connId })
   }
 </script>
 
@@ -28,6 +43,7 @@
         <span class="verb">está acessando</span>
       </span>
       <Button variant="danger" onclick={() => end(c.conn_id)}>Encerrar</Button>
+      {#if failed[c.conn_id]}<span class="err" role="alert">{failed[c.conn_id]}</span>{/if}
     </div>
   {/each}
 </section>
@@ -80,6 +96,11 @@
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .err {
+    padding-right: var(--space-3);
+    color: var(--danger);
     white-space: nowrap;
   }
   strong {

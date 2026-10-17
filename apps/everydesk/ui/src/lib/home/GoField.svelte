@@ -33,13 +33,13 @@
   })
 
   function go() {
-    const id = resolveTarget(contacts, query)
-    if (!id) {
-      error = 'Digite o código da outra máquina.'
+    const t = resolveTarget(contacts, query)
+    if ('error' in t) {
+      error = t.error
       return
     }
     error = ''
-    onconnect(id)
+    onconnect(t.id)
   }
 
   function keydown(e: KeyboardEvent) {
