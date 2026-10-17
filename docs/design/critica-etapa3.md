@@ -188,7 +188,7 @@ Capturas: `04-cartoes-dark.png`, `04-cartoes-light.png`.
 **Sugestões**
 - **Must:** no cartão com chave que não confere, "Aceitar" vira botão secundário (contornado) e
   "Recusar" vira o padrão. A cor não pode empurrar para o risco. Arquivos:
-  `lib/cards/AccessCard.svelte`, `lib/cards/cards.ts`.
+  `lib/cards/AccessCard.svelte:113` (nível `loud` vem de `lib/cm.ts:38`).
 - **Should:** remover o "57 s" textual, ou colocar o número dentro do anel no lugar das iniciais
   nos últimos 10 s. O `aria-label` do anel já cobre o leitor de tela.
 - **Should:** código em `--text` e `--fs-body`, e "Da próxima vez:" em `--text`.
@@ -244,7 +244,7 @@ Capturas: `05-arquivos-arrastando.png`, `05-badge-conectado.png`.
 4. **[Must]** Faísca e traço do botão sem loop infinito: o traço avança e para
    (`connecting.ts`, `Connecting.svelte`, `Button.svelte`).
 5. **[Must]** Cartão com chave que não confere: "Aceitar" secundário, sem acento
-   (`AccessCard.svelte`, `cards.ts`).
+   (`AccessCard.svelte:113`, `cm.ts`).
 6. **[Should]** Varredura de "cinza pequeno": `--text-muted` só em `--fs-body` ou maior, nunca em
    informação de segurança. Afeta BigCode, Connecting, RequestCard, AccessCard, SessionPill e
    ConnectedBadge.
