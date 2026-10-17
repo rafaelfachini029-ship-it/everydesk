@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   ALT_IDLE,
   ALT_TAP_MS,
   HIDE_MS,
+  PILL_TOOLS,
   altTapReducer,
   createHideTimer,
   formatFps,
@@ -25,15 +27,26 @@ test('latency reads "32 ms"', () => {
   assert.equal(formatFps(null), null)
 })
 
-test('keys reach the remote only from the revealed screen, never from the pill', () => {
+test('keys reach the remote only from the revealed screen, never from the pill or an open message', () => {
   const all = [true, false]
   for (const canvasFocused of all)
     for (const pillFocused of all)
       for (const revealed of all)
-        assert.equal(
-          shouldForwardKey({ canvasFocused, pillFocused, revealed }),
-          canvasFocused && !pillFocused && revealed,
-        )
+        for (const overlayOpen of all)
+          assert.equal(
+            shouldForwardKey({ canvasFocused, pillFocused, revealed, overlayOpen }),
+            canvasFocused && !pillFocused && revealed && !overlayOpen,
+          )
+  // no overlay field: same as closed
+  assert.equal(shouldForwardKey({ canvasFocused: true, pillFocused: false, revealed: true }), true)
+})
+
+test('the pill holds only tools that work: no "em breve" tools in Stage 3', () => {
+  assert.deepEqual([...PILL_TOOLS], ['monitores', 'qualidade', 'encerrar'])
+  for (const gone of ['conversa', 'arquivos', 'gravar', 'voz']) assert.ok(!(PILL_TOOLS as readonly string[]).includes(gone), gone)
+  const src = readFileSync(new URL('../src/lib/session/SessionPill.svelte', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /em breve|SOON|icons\/(messages-square|folder|circle-dot|mic)'/)
+  assert.match(src, />Encerrar</)
 })
 
 test('dead zone is the pill rect; a hidden pill (null) swallows nothing', () => {

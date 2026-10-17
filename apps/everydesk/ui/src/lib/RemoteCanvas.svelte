@@ -14,6 +14,8 @@
     type AltEvent,
   } from './session/sessionPill.ts'
   import Button from './ui/Button.svelte'
+  import Field from './ui/Field.svelte'
+  import { tick } from 'svelte'
   import {
     EVENTS,
     FRAME_HEADER_LEN,
@@ -66,6 +68,8 @@
   // shows the progress and any message.
   let revealed = $state(false)
   let root: HTMLElement
+  let dialog: HTMLElement | undefined = $state()
+  const uid = $props.id()
   // Fallback ImageData (one per display) for packets whose stride has padding.
   const images = new Map<number, ImageData>()
 
@@ -282,6 +286,7 @@
       revealed,
       canvasFocused: target === canvas || target === document.body,
       pillFocused: !!pill?.owns(target),
+      overlayOpen: msg !== null,
     })
     // Typing in the pill or a password field: never a tap, never forwarded.
     if (!ok) {
@@ -315,9 +320,51 @@
 
   function submitPassword(e: SubmitEvent) {
     e.preventDefault()
+    if (!retryPassword) return
     login(retryPassword)
     retryPassword = ''
+    closeMessage()
+  }
+
+  /** The message over the session goes; the keyboard returns to the remote screen. */
+  function closeMessage() {
     msg = null
+    tick().then(() => canvas.focus())
+  }
+
+  // A message over a live session is a modal dialog: it takes the focus (the password field,
+  // or OK) as it opens, releases what the peer still holds, and nothing typed reaches the
+  // remote until it closes (shouldForwardKey overlayOpen).
+  $effect(() => {
+    if (!revealed || !msg || !dialog) return
+    releaseKeys()
+    alt({ type: 'reset' })
+    const d = dialog
+    tick().then(() => d.querySelector<HTMLElement>('input, button')?.focus())
+  })
+
+  function dialogKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      // A notice closes; a password prompt cancels (that ends the attempt, as "Cancelar").
+      if (needsPassword) disconnect()
+      else closeMessage()
+      return
+    }
+    if (e.key !== 'Tab' || !dialog) return
+    // Keep Tab inside the dialog.
+    const stops = [...dialog.querySelectorAll<HTMLElement>('input, button:not([disabled])')]
+    if (!stops.length) return
+    const first = stops[0]
+    const last = stops[stops.length - 1]
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault()
+      last.focus()
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault()
+      first.focus()
+    }
   }
 
   onMount(() => {
@@ -373,9 +420,11 @@
 </script>
 
 <div class="remote" class:revealed bind:this={root}>
+  <!-- Not focusable until the reveal: hidden under the connecting screen it must not take
+       Tab (reveal() focuses it programmatically). -->
   <canvas
     bind:this={canvas}
-    tabindex="0"
+    tabindex={revealed ? 0 : -1}
     onpointermove={onPointerMove}
     onpointerdown={onPointerDown}
     onpointerup={onPointerUp}
@@ -395,16 +444,31 @@
   {/if}
 
   {#if revealed && msg}
-    <div class="overlay">
-      <p class="t-lead">{msg.title}</p>
-      {#if msg.text}<p class="t-body muted">{msg.text}</p>{/if}
+    <div class="scrim" aria-hidden="true"></div>
+    <div
+      class="overlay"
+      bind:this={dialog}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="{uid}-title"
+      aria-describedby={msg.text ? `${uid}-text` : undefined}
+      tabindex="-1"
+      onkeydown={dialogKeydown}
+    >
+      <h2 id="{uid}-title" class="t-lead">{msg.title}</h2>
+      {#if msg.text}<p id="{uid}-text" class="t-body muted">{msg.text}</p>{/if}
       {#if needsPassword}
         <form onsubmit={submitPassword}>
-          <input type="password" placeholder="Senha" aria-label="Senha" bind:value={retryPassword} />
-          <Button variant="primary" type="submit">Entrar</Button>
+          <Field label="Senha" type="password" autocomplete="current-password" bind:value={retryPassword} />
+          <div class="row">
+            <Button variant="primary" type="submit">Entrar</Button>
+            <Button onclick={disconnect}>Cancelar</Button>
+          </div>
         </form>
-      {:else if connected}
-        <Button onclick={() => (msg = null)}>OK</Button>
+      {:else}
+        <div class="row">
+          {#if connected}<Button onclick={closeMessage}>OK</Button>{:else}<Button onclick={disconnect}>Encerrar</Button>{/if}
+        </div>
       {/if}
     </div>
   {/if}
@@ -434,7 +498,7 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    z-index: 3;
+    z-index: 4;
     display: grid;
     gap: var(--space-3);
     justify-items: center;
@@ -447,27 +511,32 @@
     max-width: 26rem;
     text-align: center;
   }
+  .overlay h2,
   .overlay p {
     margin: 0;
+  }
+  .scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    background: rgb(0 0 0 / 0.35);
+  }
+  .overlay:focus {
+    outline: none;
   }
   .muted {
     color: var(--text-muted);
   }
   .overlay form {
+    display: grid;
+    gap: var(--space-4);
+    width: 100%;
+    text-align: start;
+  }
+  .row {
     display: flex;
-    gap: var(--space-2);
-  }
-  .overlay input {
-    min-height: 44px;
-    padding: 0 var(--space-4);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--radius-pill);
-    background: var(--surface-2);
-    color: var(--text);
-    font: inherit;
-  }
-  .overlay input:focus-visible {
-    outline: 2px solid var(--ring);
-    outline-offset: 2px;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-3);
   }
 </style>

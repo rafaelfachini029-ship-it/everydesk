@@ -3,6 +3,9 @@
   Collapsed: latency, who is on the other side, the voice dot. Hover or focus expands it into
   the session tools; it hides 2 s after the pointer and focus leave, and comes back when the
   pointer reaches the top edge (peek) or on an Alt tap (summon, which also focuses it).
+  Only what works is here (sessionPill.ts PILL_TOOLS): monitors, the quality reading and
+  Encerrar. Chat, files, recording and voice return in Stage 4. On narrow windows (or 200 %
+  zoom) the pill wraps onto two rows so Encerrar is never clipped.
   Props:
     peerId: string
     onend: () => void — "Encerrar"
@@ -15,10 +18,6 @@
   import { onDestroy, onMount, tick } from 'svelte'
   import Monitor from 'lucide-svelte/icons/monitor'
   import Gauge from 'lucide-svelte/icons/gauge'
-  import MessagesSquare from 'lucide-svelte/icons/messages-square'
-  import Folder from 'lucide-svelte/icons/folder'
-  import CircleDot from 'lucide-svelte/icons/circle-dot'
-  import Mic from 'lucide-svelte/icons/mic'
   import PhoneOff from 'lucide-svelte/icons/phone-off'
   import Button from '../ui/Button.svelte'
   import Icon from '../ui/Icon.svelte'
@@ -45,13 +44,6 @@
 
   const latency = $derived(formatLatency($quality.delay))
   const fps = $derived(formatFps($quality.fps))
-  const SOON = 'em breve'
-  const soon = [
-    { icon: MessagesSquare, label: 'Conversa' },
-    { icon: Folder, label: 'Arquivos' },
-    { icon: CircleDot, label: 'Gravar' },
-    { icon: Mic, label: 'Voz' },
-  ]
 
   const hideTimer = createHideTimer(() => {
     shown = false
@@ -179,43 +171,17 @@
       {/if}
     </div>
 
-    <button
-      class="tool wide"
-      aria-disabled="true"
-          onclick={onreturn}
-      aria-label="Qualidade automática"
-      aria-describedby="{uid}-soon"
-      onpointerenter={() => show(`Qualidade · ${SOON}`)}
-      onfocus={() => show(`Qualidade · ${SOON}`)}
-      onpointerleave={() => show(null)}
-    >
-      <Icon icon={Gauge} />
+    <span class="quality">
+      <span class="glyph"><Icon icon={Gauge} /></span>
       <span class="auto">automática</span>
-    </button>
-    {#if fps}<span class="fps t-num" aria-label="{fps} por segundo">{fps}</span>{/if}
-
-    <span class="rule" aria-hidden="true"></span>
-
-    {#each soon as t (t.label)}
-      <button
-        class="tool"
-        aria-disabled="true"
-          onclick={onreturn}
-        aria-label={t.label}
-        aria-describedby="{uid}-soon"
-        onpointerenter={() => show(`${t.label} · ${SOON}`)}
-        onfocus={() => show(`${t.label} · ${SOON}`)}
-        onpointerleave={() => show(null)}
-      >
-        <Icon icon={t.icon} />
-      </button>
-    {/each}
+      {#if fps}<span class="fps t-num" aria-hidden="true">{fps}</span>{/if}
+      <span class="sr-only">Qualidade automática{fps ? `, ${fps.replace('fps', 'quadros por segundo')}` : ''}</span>
+    </span>
 
     <span class="rule" aria-hidden="true"></span>
     <Button variant="danger" icon={PhoneOff} onclick={onend}>Encerrar</Button>
   </Pill>
 
-  <span id="{uid}-soon" hidden>{SOON}</span>
   <span id="{uid}-one" hidden>A outra máquina tem um monitor só</span>
   <p class="hint" class:on={expanded && hint} aria-hidden="true">{hint ?? ''}</p>
   <FileTrail />
@@ -265,6 +231,33 @@
   .dock :global(.pill:not(.expanded) .tools-inner) {
     padding-inline: 0;
     border-left-color: transparent;
+  }
+
+  /* Narrow window or 200 % zoom: the tools wrap under the summary instead of being clipped,
+     so Encerrar always stays on screen. */
+  @media (max-width: 720px) {
+    .dock :global(.pill) {
+      flex-wrap: wrap;
+      justify-content: center;
+      border-radius: var(--radius-lg);
+      padding: var(--space-1) var(--space-2);
+    }
+    .dock :global(.pill.expanded .tools) {
+      flex-basis: 100%;
+    }
+    .dock :global(.pill .tools-inner) {
+      flex-wrap: wrap;
+      justify-content: center;
+      row-gap: var(--space-1);
+      border-left: 0;
+      padding-left: 6px;
+    }
+    .dock :global(.pill.expanded .tools-inner) {
+      border-top: 1px solid var(--line);
+    }
+    .rule {
+      display: none;
+    }
   }
 
   .lat {
@@ -336,16 +329,22 @@
     border-color: var(--line-strong);
     background: var(--surface-2);
   }
-  .tool.wide {
-    width: auto;
-    padding: 0 var(--space-3);
+  .quality {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-2) 0 var(--space-1);
+    white-space: nowrap;
+  }
+  .quality .glyph {
+    padding: 0;
   }
   .auto {
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
+    color: var(--text);
   }
   .fps {
-    padding: 0 var(--space-2) 0 0;
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
     color: var(--text-muted);
   }
   .rule {

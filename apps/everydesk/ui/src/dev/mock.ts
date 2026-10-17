@@ -28,6 +28,22 @@ mockIPC(
         return null
       case 'cm_pending':
         // /#conectado: two authorized sessions on this machine (ConnectedBadge).
+        // /#pedidos: two access requests (one verified with an offer, one whose key does not
+        // match) plus a "still connected?" ring, for the card stack (moment 4).
+        if (location.hash === '#pedidos')
+          return {
+            pending: [
+              { conn_id: 11, peer_id: 'agua-lua-7', name: 'Mãe', is_file_transfer: false, age_ms: 4000 },
+              { conn_id: 12, peer_id: 'verde-onca-13', name: 'Escritório', is_file_transfer: false, age_ms: 1000 },
+            ],
+            connected: [{ conn_id: 13, peer_id: 'cedro-falcao-58', name: 'Notebook da Ana' }],
+            offers: [{ conn_id: 11, peer_id: 'agua-lua-7', name: 'Mãe', key_changed: false }],
+            identities: [
+              { conn_id: 11, state: 'verified', known: true },
+              { conn_id: 12, state: 'key_changed', known: true },
+            ],
+            reconfirms: [{ conn_id: 13, ring_secs: 60, age_ms: 9000 }],
+          }
         return {
           pending: [],
           connected:
@@ -65,7 +81,10 @@ if (location.hash === '#claro') {
 // shows its accept card. /#erro: the server never answers (with the engine's clock hint,
 // which the screen must not show). /#revela: a first frame arrives and the session opens.
 // /#sessao (moment 3): straight into a session with two monitors and quality readings.
+// /#aviso and /#senha-sessao: a session, then a notice / a password prompt over it (the
+// overlay is a modal dialog that owns the keyboard).
 const flow = location.hash.slice(1)
+const sessionFlow = flow === 'sessao' || flow === 'aviso' || flow === 'senha-sessao'
 function connecting(frames: Channel<ArrayBuffer>) {
   const at = (ms: number, f: () => void) => setTimeout(f, ms)
   const box = (kind: string, title: string, text: string) => emit('session:msgbox', { kind, title, text })
@@ -75,13 +94,15 @@ function connecting(frames: Channel<ArrayBuffer>) {
       box('error', 'Connection Error', 'Failed to connect via rendezvous server. Se o problema persistir, confira o relógio do computador.')
       emit('session:closed')
     })
-  if (flow === 'sessao') {
+  if (sessionFlow) {
     // Moment 3: a session with two monitors and live quality readings.
     at(300, () => emit('session:displays', [{ x: 0, y: 0, w: 1280, h: 800 }, { x: 1280, y: 0, w: 1280, h: 800 }]))
     at(400, () => emit('session:connected'))
     at(600, () => frames.onmessage(fakeFrame(1280, 800)))
     let n = 0
     setInterval(() => emit('session:quality', { fps: 30 - (n % 3), delay: 32 + (n++ % 5), speed: null }), 1000)
+    if (flow === 'aviso') at(1500, () => box('info', 'A outra máquina vai reiniciar', 'A sessão continua quando ela voltar.'))
+    if (flow === 'senha-sessao') at(1500, () => box('re-input-password', 'Digite a senha de novo', 'A senha mudou na outra máquina.'))
   }
   if (flow === 'revela') {
     at(2200, () => emit('session:displays', [{ x: 0, y: 0, w: 1280, h: 800 }]))
@@ -109,7 +130,7 @@ function fakeFrame(w: number, h: number): ArrayBuffer {
   return buf
 }
 
-if (['busca', 'pedindo', 'erro', 'revela', 'sessao'].includes(flow))
+if (['busca', 'pedindo', 'erro', 'revela', 'sessao', 'aviso', 'senha-sessao'].includes(flow))
   setTimeout(() => {
     const input = document.querySelector<HTMLInputElement>('.go input')
     if (!input) return

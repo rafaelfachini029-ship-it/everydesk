@@ -22,6 +22,11 @@ export function formatFps(fps: number | null | undefined): string | null {
   return `${Math.max(0, Math.round(fps))} fps`
 }
 
+/** What the expanded pill holds in Stage 3: only tools that work. Chat, files, recording and
+ *  voice come back in Stage 4, when they do something ("em dúvida, remover", spec §6.3).
+ *  Quality is a reading (fps), not a control. */
+export const PILL_TOOLS = ['monitores', 'qualidade', 'encerrar'] as const
+
 export interface KeyGate {
   /** The event's target is the remote screen (or nothing in particular: the page body). */
   canvasFocused: boolean
@@ -29,11 +34,14 @@ export interface KeyGate {
   pillFocused: boolean
   /** The first frame has been painted. */
   revealed: boolean
+  /** A message over the session (password, notice) is open: it owns the keyboard. */
+  overlayOpen?: boolean
 }
 
-/** A key press goes to the remote only after the reveal, from the screen, never from the pill. */
+/** A key press goes to the remote only after the reveal, from the screen, never from the pill,
+ *  and never while a message over the session is open. */
 export function shouldForwardKey(g: KeyGate): boolean {
-  return g.revealed && g.canvasFocused && !g.pillFocused
+  return g.revealed && g.canvasFocused && !g.pillFocused && !g.overlayOpen
 }
 
 export interface Rect {
