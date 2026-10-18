@@ -205,6 +205,43 @@ async fn click_approve_deadline(authorized: bool, prompted: Option<Instant>) {
     std::future::pending().await
 }
 
+/// EveryDesk: what a login does while nobody is logged in on the host (`is_prelogin`: login
+/// screen, the service running as SYSTEM). There is no `_cm` then, so no one can answer the
+/// accept card or a reconfirmation ring.
+#[cfg(feature = "everydesk")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreloginDecision {
+    /// A verified contact the owner chose to keep connected: log in without a prompt.
+    Authorize,
+    /// Anyone else: refuse at once with `LOGIN_MSG_NO_USER`.
+    Refuse,
+    /// Someone is logged in: the usual flow (policy, accept card).
+    Normal,
+}
+
+/// EveryDesk: only a verified controller (`controller_pk`) whose pairing policy is exactly
+/// `StayConnected`, with no pending deny (`ask_next`), opening a screen session, gets in before
+/// login. `Reconfirm` is refused: nobody could answer the ring. `policy` is `None` when the
+/// controller is unverified.
+#[cfg(feature = "everydesk")]
+fn prelogin_decision(
+    prelogin: bool,
+    verified: bool,
+    policy: Option<crate::everydesk::pairings::Policy>,
+    ask_next: bool,
+    screen: bool,
+) -> PreloginDecision {
+    use crate::everydesk::pairings::Policy;
+    if !prelogin {
+        return PreloginDecision::Normal;
+    }
+    if verified && !ask_next && screen && policy == Some(Policy::StayConnected) {
+        PreloginDecision::Authorize
+    } else {
+        PreloginDecision::Refuse
+    }
+}
+
 /// Whether the host handles a `FileAction` (everydesk). A file-transfer login keeps the stock
 /// behaviour (always handled). A screen session (`DEFAULT_CONN`) handles it only while it is
 /// authorized and file access is on (`Connection::ed_files_enabled`), so
@@ -3359,6 +3396,14 @@ impl Connection {
                 return false;
             }
 
+            // EveryDesk: before anyone logs in there is no `_cm` to show the accept card, so
+            // decide here: a verified stay-connected contact gets in, anyone else is refused at
+            // once (never the wait for a CM that cannot appear).
+            #[cfg(feature = "everydesk")]
+            if let Some(keep_alive) = self.login_before_user(&lr.my_id, &lr.my_name).await {
+                return keep_alive;
+            }
+
             #[cfg(target_os = "windows")]
             if self.terminal
                 && lr.os_login.username.trim().is_empty()
@@ -5882,6 +5927,54 @@ impl Connection {
         Some(true)
     }
 
+    /// EveryDesk: the login decision while nobody is logged in on the host; `None` when
+    /// someone is (the usual flow continues). Authorizing starts the `_cm` bridge, which
+    /// waits for a user session and attaches the app's indicators once the app is up.
+    #[cfg(feature = "everydesk")]
+    async fn login_before_user(&mut self, peer_id: &str, name: &str) -> Option<bool> {
+        if !crate::platform::is_prelogin() {
+            return None;
+        }
+        let verified = self.controller_pk.is_some();
+        let policy = verified.then(|| self.everydesk_policy(peer_id));
+        let ask_next = crate::everydesk::pairings::book()
+            .lock()
+            .unwrap()
+            .get(peer_id)
+            .map_or(false, |p| p.ask_next);
+        match prelogin_decision(true, verified, policy, ask_next, self.is_screen_session()) {
+            PreloginDecision::Normal => None,
+            PreloginDecision::Refuse => {
+                log::info!(
+                    "everydesk: {} refused before login (verified: {}, policy: {:?}, ask_next: {})",
+                    peer_id,
+                    verified,
+                    policy,
+                    ask_next
+                );
+                self.send_login_error(crate::client::LOGIN_MSG_NO_USER).await;
+                Some(false)
+            }
+            PreloginDecision::Authorize => {
+                log::info!(
+                    "everydesk: stay-connected contact {} logged in before any user",
+                    peer_id
+                );
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                self.try_start_cm_ipc();
+                self.pair_offered = None;
+                self.reconfirm = None;
+                self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::Click);
+                if !self.send_logon_response_and_keep_alive().await {
+                    return Some(false);
+                }
+                // Queued until the bridge attaches (`send_to_cm` never fails hard).
+                self.try_start_cm(peer_id.to_owned(), name.to_owned(), self.authorized);
+                Some(true)
+            }
+        }
+    }
+
     /// EveryDesk: what the accept card may say about who is asking (verified, unverified, or
     /// signed with another key than the one a book pins for this id).
     #[cfg(feature = "everydesk")]
@@ -7158,9 +7251,19 @@ async fn start_ipc(
 ) -> ResultType<()> {
     use hbb_common::anyhow::anyhow;
 
+    #[cfg(feature = "everydesk")]
+    let mut waited_for_user = false;
     loop {
         if !crate::platform::is_prelogin() {
             break;
+        }
+        // EveryDesk: the connection ended while nobody was logged in; nothing to bridge.
+        #[cfg(feature = "everydesk")]
+        {
+            if tx_from_cm.is_closed() {
+                bail!("expected");
+            }
+            waited_for_user = true;
         }
         sleep(1.).await;
     }
@@ -7170,9 +7273,15 @@ async fn start_ipc(
     }
     // EveryDesk: the app process itself serves `_cm` (apps/everydesk/src/cm.rs); a `--cm`
     // child would be a second app window. Wait for it instead of spawning one.
+    // A session authorized before login waits up to ~60 s for the app to autostart in the
+    // new user session (the usual ~6 s otherwise); still no `_cm` ends the session.
     #[cfg(feature = "everydesk")]
     if stream.is_none() {
-        for _ in 0..20 {
+        let tries = if waited_for_user { 200 } else { 20 };
+        for _ in 0..tries {
+            if tx_from_cm.is_closed() {
+                bail!("expected");
+            }
             sleep(0.3).await;
             if let Ok(s) = crate::ipc::connect(1000, "_cm").await {
                 stream = Some(s);
@@ -8180,6 +8289,39 @@ mod test {
         assert_eq!(click_approve_deadline_at(t) - t, Duration::from_secs(60));
         assert!(Duration::from_secs(CLICK_APPROVE_TIMEOUT_SECS) < LOGIN_GRACE);
         assert_eq!(crate::client::LOGIN_MSG_TIMEOUT, "Pedido não respondido em 60 s");
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn prelogin_authorizes_only_stay_connected() {
+        use super::PreloginDecision::*;
+        use crate::everydesk::pairings::Policy::*;
+        let reconfirm = Reconfirm { every_min: 30 };
+        // (prelogin, verified, policy, ask_next, screen) -> decision
+        let table = [
+            (true, true, Some(StayConnected), false, true, Authorize),
+            (true, true, Some(reconfirm), false, true, Refuse),
+            (true, true, Some(AskAlways), false, true, Refuse),
+            (true, false, None, false, true, Refuse),
+            (true, false, Some(StayConnected), false, true, Refuse),
+            (true, true, Some(StayConnected), true, true, Refuse),
+            (true, true, Some(StayConnected), false, false, Refuse),
+            (true, true, None, false, true, Refuse),
+            (false, true, Some(StayConnected), false, true, Normal),
+            (false, false, None, false, false, Normal),
+            (false, true, Some(reconfirm), true, true, Normal),
+        ];
+        for (prelogin, verified, policy, ask_next, screen, want) in table {
+            assert_eq!(
+                super::prelogin_decision(prelogin, verified, policy, ask_next, screen),
+                want,
+                "{prelogin} {verified} {policy:?} {ask_next} {screen}"
+            );
+        }
+        assert_eq!(
+            crate::client::LOGIN_MSG_NO_USER,
+            "Ninguém está usando a outra máquina agora"
+        );
     }
 
     #[cfg(feature = "everydesk")]

@@ -128,6 +128,10 @@ pub const LOGIN_MSG_RECONFIRM_DENIED: &str = "Conexão encerrada pelo dono da m�
 /// EveryDesk: a periodic reconfirmation went unanswered for `RECONFIRM_RING_SECS`.
 #[cfg(feature = "everydesk")]
 pub const LOGIN_MSG_RECONFIRM_TIMEOUT: &str = "Reconfirmação não respondida em 60 s";
+/// EveryDesk: nobody is logged in on the host (login screen, service running as SYSTEM) and
+/// the controller is not a verified "stay connected" contact, so no one could accept it.
+#[cfg(feature = "everydesk")]
+pub const LOGIN_MSG_NO_USER: &str = "Ninguém está usando a outra máquina agora";
 pub const LOGIN_SCREEN_WAYLAND: &str = "Wayland login screen is not supported";
 #[cfg(target_os = "linux")]
 pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "ubuntu-21-04-required";
