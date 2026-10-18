@@ -651,7 +651,7 @@ impl InvokeUiCM for TauriCM {
     fn change_theme(&self, _dark: String) {}
     fn change_language(&self) {}
     fn show_elevation(&self, show: bool) {
-        let remembered = Config::get_option(AUTO_ELEVATE_OPTION);
+        let remembered = crate::settings::get_option(AUTO_ELEVATE_OPTION);
         let d = elevation_decision(&remembered, show, ui_cm_interface::can_elevate());
         let Some(ev) = with_state(|s| s.elevation_step(show, d)) else {
             return;
@@ -732,13 +732,20 @@ impl InvokeUiCM for TauriCM {
 /// so that no stored `approve-mode` (`password` or both; `password::approve_mode`: anything
 /// but `click`/`password`) can ever let a password login in without a prompt. The config is
 /// EveryDesk's own (`APP_NAME` "EveryDesk", see docs/caminhos.md), not RustDesk's.
+///
+/// `main` runs this in every process, so the service's `--server` forces it on the service's
+/// own config at its startup; the app window additionally re-checks the service over IPC
+/// (`server::ensure_host_config_on_service`).
 pub fn force_click_approve_mode() {
-    let cur = Config::get_option("approve-mode");
+    let (key, click) = APPROVE_CLICK;
+    let cur = Config::get_option(key);
     if needs_click_override(&cur) {
         log::info!("everydesk: approve-mode {cur:?} -> \"click\"");
-        Config::set_option("approve-mode".to_owned(), "click".to_owned());
+        Config::set_option(key.to_owned(), click.to_owned());
     }
 }
+
+pub const APPROVE_CLICK: (&str, &str) = ("approve-mode", "click");
 
 fn needs_click_override(current: &str) -> bool {
     current != "click"
@@ -809,7 +816,9 @@ pub fn cm_pair_ack(
 pub fn cm_elevate(conn_id: i32, remember: bool) {
     log::info!("everydesk: elevate #{conn_id} (remember={remember})");
     if remember {
-        Config::set_option(AUTO_ELEVATE_OPTION.to_owned(), "Y".to_owned());
+        if let Err(e) = crate::settings::set_option(AUTO_ELEVATE_OPTION, "Y") {
+            log::warn!("everydesk: remember elevation: {e}");
+        }
     }
     with_state(|s| s.elevation.answered());
     ui_cm_interface::elevate_portable(conn_id);
@@ -821,7 +830,9 @@ pub fn cm_elevate(conn_id: i32, remember: bool) {
 pub fn cm_elevation_dismiss(remember_no: bool) {
     log::info!("everydesk: elevation dismissed (remember_no={remember_no})");
     if remember_no {
-        Config::set_option(AUTO_ELEVATE_OPTION.to_owned(), "N".to_owned());
+        if let Err(e) = crate::settings::set_option(AUTO_ELEVATE_OPTION, "N") {
+            log::warn!("everydesk: remember no elevation: {e}");
+        }
     }
     with_state(|s| s.elevation.answered());
 }
@@ -829,7 +840,7 @@ pub fn cm_elevation_dismiss(remember_no: bool) {
 /// The remembered answer: "Y" (elevate without asking), "N" (never ask) or "" (ask).
 #[tauri::command]
 pub fn cm_elevation_setting() -> String {
-    normalize_setting(&Config::get_option(AUTO_ELEVATE_OPTION)).to_owned()
+    normalize_setting(&crate::settings::get_option(AUTO_ELEVATE_OPTION)).to_owned()
 }
 
 /// Changes the remembered answer (for the settings toggle); "" goes back to asking.
@@ -838,8 +849,7 @@ pub fn cm_elevation_set_setting(value: String) -> Result<(), String> {
     if normalize_setting(&value) != value {
         return Err(format!("invalid elevation setting {value:?}"));
     }
-    Config::set_option(AUTO_ELEVATE_OPTION.to_owned(), value);
-    Ok(())
+    crate::settings::set_option(AUTO_ELEVATE_OPTION, &value)
 }
 
 /// The connection whose elevation card is up and unanswered, for the UI to hydrate on mount.
@@ -933,7 +943,7 @@ pub fn permissions_from(get: impl Fn(&str) -> String) -> Permissions {
 /// "Área de transferência".
 #[tauri::command]
 pub fn cm_get_permissions() -> Permissions {
-    permissions_from(|k| Config::get_option(k))
+    permissions_from(crate::settings::get_option)
 }
 
 /// Flips one host switch: stored for the next sessions and applied to every session on now
@@ -942,12 +952,14 @@ pub fn cm_get_permissions() -> Permissions {
 pub fn cm_set_permission(name: String, on: bool) -> Result<(), String> {
     let opt = permission_option(&name).ok_or_else(|| format!("Permissão desconhecida: {name}"))?;
     log::info!("everydesk: permission {name} -> {on}");
-    Config::set_option(opt.to_owned(), option_value(on).to_owned());
+    // Stored where the host reads it; on IPC failure the live sessions still switch and the
+    // error tells the UI the setting did not reach the service.
+    let stored = crate::settings::set_option(opt, option_value(on));
     let live: Vec<i32> = with_state(|s| s.connected.keys().copied().collect());
     for id in live {
         ui_cm_interface::switch_permission(id, name.clone(), on);
     }
-    Ok(())
+    stored
 }
 
 #[cfg(test)]

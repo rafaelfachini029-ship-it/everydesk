@@ -5,6 +5,7 @@ mod files;
 mod record;
 mod server;
 mod service;
+mod settings;
 mod session;
 pub mod memorable;
 
@@ -13,7 +14,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 #[tauri::command]
 fn get_my_id() -> String {
-    Config::get_id()
+    settings::host_id()
 }
 
 /// Same source the old Sciter UI polled: `ui_interface` keeps an IPC
@@ -228,6 +229,8 @@ fn run(hidden: bool) {
             let service_mode = service::is_service_mode();
             log::info!("everydesk: service mode {service_mode}");
             std::thread::spawn(move || librustdesk::start_server(false, service_mode));
+            // The service's config is the host's: pin server/key/click approval there too.
+            server::ensure_host_config_on_service();
             service::start_watcher(app.handle().clone());
             Ok(())
         })
