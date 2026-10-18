@@ -84,6 +84,24 @@ test('refused signature: says nothing was installed and offers a retry', () => {
   assert.equal(updateCardView(updateReducer(e, { type: 'later' })).visible, false)
 })
 
+test('retry after a failure with a session open reaches "Encerrar e atualizar"', () => {
+  const failed = run({ type: 'status', status: st({ phase: 'failed', message: 'A permissão de administrador não foi concedida.' }) })
+  assert.deepEqual(updateCardView(failed).primary, { label: 'Tentar de novo', force: false })
+  // "Tentar de novo" -> backend answers session-active (phase still `failed`)
+  const asked = updateReducer(failed, { type: 'session-active' })
+  const v = updateCardView(asked)
+  assert.equal(v.title, 'Há uma sessão ativa.')
+  assert.deepEqual(v.primary, { label: 'Encerrar e atualizar', force: true })
+  // a repeated `failed` status does not drop the question
+  const still = updateReducer(asked, { type: 'status', status: st({ phase: 'failed', message: 'x' }) })
+  assert.equal(updateCardView(still).primary?.force, true)
+  // Cancelar goes back to the failure, not to a loop
+  assert.equal(updateCardView(updateReducer(asked, { type: 'cancel' })).title, 'Atualização não instalada.')
+  // a plain invoke error after the question also offers the retry again
+  const err = updateReducer(asked, { type: 'error', message: 'Nenhuma atualização disponível.' })
+  assert.equal(updateCardView(err).primary?.force, false)
+})
+
 test('Sobre: version and commit, or a local build', () => {
   assert.equal(
     aboutLine({ version: '0.1.0', commit: '82b42c3ea', source_url: '', license: 'AGPL-3.0' }),

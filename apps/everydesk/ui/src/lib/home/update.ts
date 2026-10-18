@@ -39,7 +39,9 @@ export function updateReducer(s: UpdateCardState, a: UpdateAction): UpdateCardSt
     case 'status': {
       // a newer version than the one put off brings the card back
       const dismissed = a.status.version && a.status.version !== s.dismissed ? null : s.dismissed
-      const confirming = s.confirming && a.status.phase === 'available'
+      // the question survives status updates while nothing started (a retry after a failure
+      // keeps the backend in `failed` until the forced install begins)
+      const confirming = s.confirming && askable(a.status.phase)
       return { ...s, status: a.status, dismissed, confirming, error: a.status.phase === 'failed' ? '' : s.error }
     }
     case 'later':
@@ -52,6 +54,9 @@ export function updateReducer(s: UpdateCardState, a: UpdateAction): UpdateCardSt
       return { ...s, confirming: false, error: a.message || 'Não consegui atualizar. Tente de novo mais tarde.' }
   }
 }
+
+/** Phases where "Atualizar agora" / "Tentar de novo" can be asked about an open session. */
+const askable = (p: UpdatePhase) => p === 'available' || p === 'failed'
 
 export interface UpdateCardView {
   visible: boolean
@@ -86,20 +91,20 @@ export function updateCardView(s: UpdateCardState): UpdateCardView {
     st.route === 'installer'
       ? 'O Windows pede permissão de administrador; o EveryDesk reabre sozinho.'
       : 'O EveryDesk fecha e abre de novo, já atualizado.'
+  if (s.confirming && askable(st.phase))
+    return {
+      ...hidden,
+      visible: true,
+      title: 'Há uma sessão ativa.',
+      body: 'Ela será encerrada para atualizar. Quem estiver conectado vai ver a conexão cair.',
+      primary: { label: 'Encerrar e atualizar', force: true },
+      secondary: 'Cancelar',
+      tone: 'warn',
+    }
   if (s.error)
     return { ...hidden, visible: true, title: 'Atualização não instalada.', body: s.error, primary: { label: 'Tentar de novo', force: false }, secondary: 'Depois', tone: 'danger' }
   switch (st.phase) {
     case 'available':
-      if (s.confirming)
-        return {
-          ...hidden,
-          visible: true,
-          title: 'Há uma sessão ativa.',
-          body: 'Ela será encerrada para atualizar. Quem estiver conectado vai ver a conexão cair.',
-          primary: { label: 'Encerrar e atualizar', force: true },
-          secondary: 'Cancelar',
-          tone: 'warn',
-        }
       return { ...hidden, visible: true, title: `Nova versão ${v}.`, body: `Atualizar agora? ${how}`, primary: { label: 'Atualizar agora', force: false }, secondary: 'Depois' }
     case 'downloading':
       return {

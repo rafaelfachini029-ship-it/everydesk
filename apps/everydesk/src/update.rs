@@ -190,11 +190,22 @@ fn session_active() -> bool {
     crate::commands::current().is_some() || librustdesk::ui_cm_interface::get_clients_length() > 0
 }
 
-/// Closes our own controller session (the peer is told why). Incoming sessions end when the
-/// host stops: the setup stops the service; the portable exe exits.
+/// Ends every session cleanly right before the swap/setup (the peers are told why instead of
+/// seeing the host vanish): our controller session, and each client of this host, connected
+/// or still asking (`ui_cm_interface::close` = the same `Data::Close` as "Encerrar").
 fn close_sessions() {
     crate::commands::close_current();
-    std::thread::sleep(Duration::from_millis(300));
+    let snap = crate::cm::cm_pending();
+    let ids = snap
+        .connected
+        .iter()
+        .map(|c| c.conn_id)
+        .chain(snap.pending.iter().map(|p| p.incoming.conn_id));
+    for id in ids {
+        log::info!("everydesk: update: closing #{id}");
+        librustdesk::ui_cm_interface::close(id);
+    }
+    std::thread::sleep(Duration::from_millis(500));
 }
 
 pub fn start(app: AppHandle) {
@@ -225,11 +236,10 @@ fn updater(app: &AppHandle, r: Route) -> tauri_plugin_updater::Result<tauri_plug
     if r == Route::Portable {
         b = b.target(PORTABLE_TARGET);
     }
-    let h = app.clone();
-    b.on_before_exit(move || {
-        close_sessions();
-        h.cleanup_before_exit();
-    })
+    // Runs after the package is verified and extracted, right before ShellExecute (UAC). No
+    // `cleanup_before_exit` here: a declined prompt makes the plugin return an error and the
+    // app must stay visible and usable ("Tentar de novo"); on success the plugin exits anyway.
+    b.on_before_exit(close_sessions)
     // `/R` alone: reopen plainly (no `/ARGS`, so not `--hidden` after a click on "Atualizar").
     .installer_arg("/R")
     .build()
@@ -334,20 +344,19 @@ fn progress_cb(app: &AppHandle) -> impl FnMut(usize, Option<u64>) {
     }
 }
 
-/// Windows: on success this never returns (the plugin runs the setup and exits the process,
-/// after `on_before_exit` closed our session).
+/// Windows: on success this never returns (the plugin runs the setup and exits the process).
+/// Sessions stay up through the download and the signature check; `on_before_exit` ends them
+/// just before the setup starts.
 async fn install_with_setup(app: &AppHandle, update: &Update) -> Result<(), String> {
-    let a = app.clone();
-    update
-        .download_and_install(progress_cb(app), move || {
-            close_sessions();
-            set_status(&a, |s| s.phase = Phase::Installing);
-        })
-        .await
-        .map_err(|e| {
-            log::error!("everydesk: setup update: {e}");
-            failure_text(&e)
-        })
+    let err = |e: tauri_plugin_updater::Error| {
+        log::error!("everydesk: setup update: {e}");
+        failure_text(&e)
+    };
+    // `download` verifies the signature (and the signed version) before returning the bytes.
+    let bytes = update.download(progress_cb(app), || {}).await.map_err(err)?;
+    set_status(app, |s| s.phase = Phase::Installing);
+    // `install` verifies again, then runs the setup (UAC). A declined prompt lands here as Err.
+    update.install(&bytes).map_err(err)
 }
 
 async fn install_portable(app: &AppHandle, update: &Update) -> Result<(), String> {
@@ -359,26 +368,87 @@ async fn install_portable(app: &AppHandle, update: &Update) -> Result<(), String
         log::error!("everydesk: portable package refused: {e}");
         BAD_SIGNATURE.to_string()
     })?;
+    // Stage next to the exe before touching any session: a read-only folder fails here.
+    let exe = std::env::current_exe().map_err(|e| {
+        log::error!("everydesk: current_exe: {e}");
+        SWAP_FAILED.to_string()
+    })?;
+    let dir = exe.parent().ok_or(SWAP_FAILED)?;
+    let staged = Staged::write(dir, &bytes)?;
     set_status(app, |s| s.phase = Phase::Installing);
     close_sessions();
-    swap_and_relaunch(app, &bytes)
+    swap_and_relaunch(app, &exe, &staged, &bytes)
+}
+
+const SWAP_FAILED: &str = "Não consegui trocar o executável. Feche o EveryDesk e baixe a nova versão.";
+pub const READ_ONLY_DIR: &str = "A pasta do EveryDesk não permite gravar, então não dá para atualizar aqui. \
+Mova o EveryDesk.exe para uma pasta sua (por exemplo, Downloads) ou baixe a nova versão.";
+
+/// The verified exe, written next to the running one under a fresh name (`create_new`: never a
+/// file someone placed there before), removed on every path when dropped.
+pub struct Staged {
+    pub path: std::path::PathBuf,
+}
+
+impl Staged {
+    pub fn write(dir: &std::path::Path, bytes: &[u8]) -> Result<Self, String> {
+        use std::io::Write;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!(".EveryDesk-update-{}-{nanos}.exe", std::process::id()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| {
+                log::error!("everydesk: stage {}: {e}", path.display());
+                READ_ONLY_DIR.to_string()
+            })?;
+        let staged = Staged { path };
+        f.write_all(bytes)
+            .and_then(|_| f.sync_all())
+            .map_err(|e| {
+                log::error!("everydesk: stage write: {e}");
+                READ_ONLY_DIR.to_string()
+            })?;
+        Ok(staged)
+    }
+
+    /// The file still holds exactly the verified bytes (checked right before `self_replace`
+    /// reads it again).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn matches(&self, verified: &[u8]) -> bool {
+        std::fs::read(&self.path).map(|b| b == verified).unwrap_or(false)
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(windows)]
-fn swap_and_relaunch(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
+fn swap_and_relaunch(
+    app: &AppHandle,
+    exe: &std::path::Path,
+    staged: &Staged,
+    verified: &[u8],
+) -> Result<(), String> {
+    use std::io::Write;
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     let fail = |e: String| {
         log::error!("everydesk: portable swap: {e}");
-        "Não consegui trocar o executável. Feche o EveryDesk e baixe a nova versão.".to_string()
+        SWAP_FAILED.to_string()
     };
-    let exe = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
-    let tmp = std::env::temp_dir().join(format!("EveryDesk-update-{}.exe", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|e| fail(e.to_string()))?;
-    let swapped = self_replace::self_replace(&tmp).map_err(|e| fail(e.to_string()));
-    let _ = std::fs::remove_file(&tmp);
-    swapped?;
+    if !staged.matches(verified) {
+        return Err(fail("staged file changed after verification".into()));
+    }
+    self_replace::self_replace(&staged.path).map_err(|e| fail(e.to_string()))?;
     let exe = exe.to_string_lossy().into_owned();
     // Waits for this pid to exit, then starts the (new) exe; Task 3's script.
     let script = crate::service::relaunch_script(
@@ -388,8 +458,18 @@ fn swap_and_relaunch(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
         crate::service::WaitFor::Nothing,
     )
     .ok_or_else(|| fail("caminho inválido".into()))?;
-    let path = std::env::temp_dir().join(format!("EveryDesk-update-relaunch-{}.cmd", std::process::id()));
-    std::fs::write(&path, script).map_err(|e| fail(e.to_string()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir()
+        .join(format!("EveryDesk-update-relaunch-{}-{nanos}.cmd", std::process::id()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(script.as_bytes()))
+        .map_err(|e| fail(e.to_string()))?;
     std::process::Command::new("cmd")
         .arg("/c")
         .arg(&path)
@@ -402,7 +482,12 @@ fn swap_and_relaunch(app: &AppHandle, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn swap_and_relaunch(_app: &AppHandle, _bytes: &[u8]) -> Result<(), String> {
+fn swap_and_relaunch(
+    _app: &AppHandle,
+    _exe: &std::path::Path,
+    _staged: &Staged,
+    _verified: &[u8],
+) -> Result<(), String> {
     Err("Atualização automática disponível no Windows nesta versão.".into())
 }
 
@@ -588,6 +673,41 @@ mod tests {
             updater["endpoints"][0],
             "https://github.com/rafaelfachini029-ship-it/everydesk/releases/latest/download/latest.json"
         );
+    }
+
+    #[test]
+    fn staged_file_is_fresh_checked_and_removed() {
+        let dir = std::env::temp_dir().join(format!("everydesk-stage-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = b"MZ verified";
+        let staged = Staged::write(&dir, bytes).unwrap();
+        let path = staged.path.clone();
+        assert!(path.starts_with(&dir));
+        assert!(staged.matches(bytes));
+        // swapped under our feet after verification -> refused
+        std::fs::write(&path, b"MZ evil").unwrap();
+        assert!(!staged.matches(bytes));
+        drop(staged);
+        assert!(!path.exists(), "staged file left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_folder_fails_before_anything_else() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("everydesk-ro-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let res = Staged::write(&dir, b"MZ");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        // (root can write anywhere; the check is meaningful for a normal user)
+        if let Err(e) = res {
+            assert_eq!(e, READ_ONLY_DIR);
+        }
     }
 
     #[test]
