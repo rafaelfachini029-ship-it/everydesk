@@ -300,11 +300,12 @@ const UNSUPPORTED: &str = "Disponível no Windows nesta versão.";
 
 /// "Instalar para acesso permanente" (and "Reiniciar serviço"). One UAC prompt.
 /// - Already installed (NSIS or an earlier install): `--install-service` recreates/starts the
-///   service; the engine kills this window and relaunches the installed exe itself.
+///   service.
 /// - Portable: `--silent-install` from a staged copy installs to Program Files and creates the
-///   service. It kills every EveryDesk.exe and does not relaunch, so a detached relauncher
-///   starts the installed exe once the service runs. (Preferred later: the NSIS setup the
-///   updater downloads, Task 7.)
+///   service. (Preferred later: the NSIS setup the updater downloads, Task 7.)
+/// Both kill every other EveryDesk.exe (this window too) and, under the `everydesk` feature,
+/// never relaunch (`run_after_run_cmds`), so a detached unelevated relauncher starts the
+/// installed exe once the service runs.
 #[tauri::command]
 pub fn install_permanent() -> Result<(), String> {
     #[cfg(windows)]
@@ -315,8 +316,8 @@ pub fn install_permanent() -> Result<(), String> {
         } else {
             let staged = win::stage_portable()?;
             win::uac(&staged, "--silent-install")?;
-            win::spawn_relauncher(&installed_exe, WaitFor::ServiceRunning)?;
         }
+        win::spawn_relauncher(&installed_exe, WaitFor::ServiceRunning)?;
         fast_poll_for(180);
         return Ok(());
     }
