@@ -100,6 +100,10 @@ const IPC_TOKEN_RANDOM_BYTES: usize = IPC_TOKEN_LEN / 2;
 #[cfg(target_os = "windows")]
 const _: () = assert!(IPC_TOKEN_LEN % 2 == 0);
 pub static EXIT_RECV_CLOSE: AtomicBool = AtomicBool::new(true);
+/// EveryDesk: called once, in a non-server process, right before it exits on `Data::Close`
+/// (the service's `--server` closing an in-process host). The app registers a relauncher.
+#[cfg(feature = "everydesk")]
+pub static ON_EXIT_RECV_CLOSE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 thread_local! {
@@ -889,6 +893,12 @@ async fn handle(data: Data, stream: &mut Connection) {
         Data::Close => {
             log::info!("Receive close message");
             if EXIT_RECV_CLOSE.load(Ordering::SeqCst) {
+                #[cfg(feature = "everydesk")]
+                if !is_server() {
+                    if let Some(hook) = ON_EXIT_RECV_CLOSE.get() {
+                        hook();
+                    }
+                }
                 #[cfg(not(target_os = "android"))]
                 crate::server::input_service::fix_key_down_timeout_at_exit();
                 if is_server() {

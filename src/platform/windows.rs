@@ -1651,6 +1651,7 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
         &format!("Uninstall {app_name}.lnk"),
         "uninstall_shortcut",
     );
+    #[cfg(not(feature = "everydesk"))]
     let tray_shortcut_commands =
         embedded_tray_shortcut_commands(&app_name, &exe, shortcut_icon_location.as_deref())?;
     let mut reg_value_desktop_shortcuts = "0".to_owned();
@@ -1707,6 +1708,15 @@ if exist \"{tmp_path}\\{app_name} Tray.lnk\" del /f /q \"{tmp_path}\\{app_name} 
         Config::set_option("api-server".into(), lic.api);
     }
 
+    // EveryDesk: `--tray` is a no-op (the `tray` feature is off); autostart is the HKLM Run
+    // value `--hidden`, the same one the NSIS hooks and `--install-service` write.
+    #[cfg(feature = "everydesk")]
+    let tray_shortcuts = if config::is_outgoing_only() {
+        "".to_owned()
+    } else {
+        everydesk_autostart_add_command(&app_name, &exe)
+    };
+    #[cfg(not(feature = "everydesk"))]
     let tray_shortcuts = if config::is_outgoing_only() {
         "".to_owned()
     } else {
@@ -1859,7 +1869,8 @@ fn get_uninstall(kill_self: bool, uninstall_printer: bool) -> ResultType<String>
     if exist \"{start_menu}\" rd /s /q \"{start_menu}\"
     if exist \"%PUBLIC%\\Desktop\\{app_name}.lnk\" del /f /q \"%PUBLIC%\\Desktop\\{app_name}.lnk\"
     if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\"
-    ",
+    {everydesk_autostart}",
+        everydesk_autostart = everydesk_autostart_delete_commands(),
         before_uninstall=get_before_uninstall(kill_self),
         uninstall_amyuni_idd=get_uninstall_amyuni_idd(),
         app_name = crate::get_app_name(),
@@ -3308,7 +3319,8 @@ pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\"
     taskkill /F /IM {broker_exe}
     taskkill /F /IM {app_name}.exe{filter}
-    ",
+    {everydesk_autostart}",
+        everydesk_autostart = everydesk_autostart_delete_commands(),
         app_name = crate::get_app_name(),
         broker_exe = WIN_TOPMOST_INJECTED_PROCESS_EXE,
     );
@@ -3332,10 +3344,16 @@ fn get_install_service_commands(path: &str, exe: &str) -> ResultType<String> {
             .to_str()
             .ok_or_else(|| anyhow!("Configuration path is not valid Unicode"))?,
     )?;
-    // EveryDesk has no `--tray` (the `tray` feature is off) and autostarts through the
-    // installer's HKLM Run value (`--hidden`), so no "Tray.lnk" in the Startup folder.
+    // EveryDesk has no `--tray` (the `tray` feature is off) and autostarts through the HKLM
+    // Run value (`--hidden`), so no "Tray.lnk" in the Startup folder. `--install-service`
+    // (re)writes that value itself, so the in-app "Instalar" and the NSIS hooks end up equal;
+    // `--uninstall-service` deletes it.
     #[cfg(feature = "everydesk")]
-    let tray_commands = String::new();
+    let tray_commands = if config::is_outgoing_only() {
+        String::new()
+    } else {
+        everydesk_autostart_add_command(&app_name, exe)
+    };
     #[cfg(not(feature = "everydesk"))]
     let tray_commands = {
         let shortcut_icon_location = get_custom_icon(path, exe);
@@ -3991,6 +4009,37 @@ fn sc_create_service_command(app_name: &str, exe: &str) -> String {
     )
 }
 
+/// HKLM Run key holding EveryDesk's login autostart (`"<exe>" --hidden`); the NSIS hooks
+/// (`apps/everydesk/windows/hooks.nsh`) write/delete the same value.
+#[cfg(feature = "everydesk")]
+const EVERYDESK_RUN_KEY: &str = "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+/// `reg add` line for the login autostart (`exe` validated by the caller; 64-bit view).
+#[cfg(feature = "everydesk")]
+fn everydesk_autostart_add_command(app_name: &str, exe: &str) -> String {
+    let exe = escape_nested_cmd_ampersands(exe);
+    format!(
+        "reg add \"{EVERYDESK_RUN_KEY}\" /v \"{app_name}\" /t REG_SZ /d \"\\\"{exe}\\\" --hidden\" /f /reg:64"
+    )
+}
+
+/// `reg delete` line for the login autostart; silent when the value is already gone.
+#[cfg(feature = "everydesk")]
+fn everydesk_autostart_delete_command(app_name: &str) -> String {
+    format!("reg delete \"{EVERYDESK_RUN_KEY}\" /v \"{app_name}\" /f /reg:64 >nul 2>&1")
+}
+
+/// Extra uninstall lines (service removal and full uninstall): EveryDesk drops its Run value.
+fn everydesk_autostart_delete_commands() -> String {
+    #[cfg(feature = "everydesk")]
+    return format!(
+        "{}\n",
+        everydesk_autostart_delete_command(&crate::get_app_name())
+    );
+    #[cfg(not(feature = "everydesk"))]
+    String::new()
+}
+
 #[cfg(feature = "everydesk")]
 fn run_after_run_cmds(silent: bool) {
     // EveryDesk: `--install-service` runs elevated from the NSIS installer, whose finish
@@ -4277,6 +4326,25 @@ pub fn try_kill_rustdesk_main_window_process() -> ResultType<()> {
         if p.user_id() == my_uid {
             log::info!("user id equal, continue");
             continue;
+        }
+        // EveryDesk: the window process just got `Data::Close` and exits by itself after
+        // spawning its relauncher (`ipc::ON_EXIT_RECV_CLOSE`); give it a moment first.
+        #[cfg(feature = "everydesk")]
+        {
+            let pid = p.pid();
+            let mut gone = false;
+            for _ in 0..15 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let mut s = System::new();
+                if !s.refresh_process(pid) {
+                    gone = true;
+                    break;
+                }
+            }
+            if gone {
+                log::info!("main window process exited by itself, pid = {:?}", pid);
+                return Ok(());
+            }
         }
         log::info!("try kill process: {:?}, pid = {:?}", p.cmd(), p.pid());
         nt_terminate_process(p.pid().as_u32())?;
@@ -4805,6 +4873,27 @@ mod tests {
         assert!(cmd.contains(&format!("binpath= \"\\\"{exe}\\\" --service\"")));
         assert!(cmd.contains(" start= auto "));
         assert!(cmd.contains("DisplayName= \"EveryDesk Service\""));
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn everydesk_autostart_commands() {
+        let exe = "C:\\Program Files\\EveryDesk\\EveryDesk.exe";
+        let add = everydesk_autostart_add_command("EveryDesk", exe);
+        assert_eq!(
+            add,
+            format!(
+                "reg add \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"EveryDesk\" /t REG_SZ /d \"\\\"{exe}\\\" --hidden\" /f /reg:64"
+            )
+        );
+        // `&` survives the nested quoting the same way as UninstallString.
+        assert!(
+            everydesk_autostart_add_command("EveryDesk", r"C:\R&D\E.exe")
+                .contains(r"C:\R^&D\E.exe")
+        );
+        let del = everydesk_autostart_delete_command("EveryDesk");
+        assert!(del.starts_with("reg delete \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"EveryDesk\" /f /reg:64"));
+        assert!(everydesk_autostart_delete_commands().contains(&del));
     }
 
     // Test-only reusable Win32 HANDLE RAII helper.

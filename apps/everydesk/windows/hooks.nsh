@@ -24,7 +24,7 @@
   ${If} $0 = 0
     ; Se o exe antigo ainda está lá, deixa o próprio motor remover o serviço.
     ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
-      ; `--uninstall-service`: sc stop + sc delete + mata os outros EveryDesk.exe.
+      ; `--uninstall-service`: sc stop + sc delete + apaga o valor Run + mata os outros EveryDesk.exe.
       ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall-service'
     ${EndIf}
     ; Garantia caso o exe antigo falhe ou não exista: para o serviço direto.
@@ -46,18 +46,21 @@
 !macro NSIS_HOOK_POSTINSTALL
   ; Mostra no log de detalhes do instalador o que está acontecendo.
   DetailPrint "Instalando o serviço de acesso permanente do EveryDesk..."
-  ; `--install-service`: importa a config do usuário para o perfil SYSTEM e faz sc create/start.
+  ; `--install-service`: importa a config do usuário para o perfil SYSTEM, faz sc create/start
+  ; e já grava o valor Run `--hidden` (o botão "Instalar" do app usa o mesmo comando).
   ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --install-service' $0
   ; Registra o código de saída no log de detalhes (0 = ok; o motor também grava log próprio).
   DetailPrint "Serviço do EveryDesk: código de saída $0"
-  ; Inicia o app escondido (só bandeja/CM) no login de qualquer usuário; `--hidden` vem da Task 3.
+  ; Inicia o app escondido (só bandeja/CM) no login de qualquer usuário. Regrava o mesmo valor
+  ; que o `--install-service` (idempotente), para o autostart existir mesmo se ele falhou.
   WriteRegStr HKLM "${EVERYDESK_RUN_KEY}" "${EVERYDESK_RUN_VALUE}" '"$INSTDIR\${MAINBINARYNAME}.exe" --hidden'
   ; Abrir o app agora fica com a página final do Tauri (RunAsUser, sem elevação).
 !macroend
 
 ; Antes de remover arquivos/registro/atalhos: tira serviço, autostart e processos.
 !macro NSIS_HOOK_PREUNINSTALL
-  ; Se o exe instalado existe, deixa o motor remover o serviço (sc stop + sc delete).
+  ; Se o exe instalado existe, deixa o motor remover o serviço (sc stop + sc delete) e o
+  ; valor Run (igual ao botão "Remover acesso permanente" do app).
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     ; `--uninstall-service` roda sem janela e encerra os outros EveryDesk.exe.
     ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall-service'
@@ -70,7 +73,8 @@
   nsExec::Exec 'sc delete "${EVERYDESK_SERVICE}"'
   ; Descarta o código de saída do sc delete.
   Pop $0
-  ; Numa atualização (/UPDATE) o autostart fica; o POSTINSTALL da nova versão o regrava.
+  ; Numa atualização (/UPDATE) não apaga aqui; o POSTINSTALL da nova versão regrava o valor
+  ; de qualquer forma (o `--uninstall-service` acima já pode tê-lo apagado).
   ${If} $UpdateMode <> 1
     ; Desinstalação de verdade: remove a inicialização automática.
     DeleteRegValue HKLM "${EVERYDESK_RUN_KEY}" "${EVERYDESK_RUN_VALUE}"

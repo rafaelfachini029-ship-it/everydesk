@@ -80,7 +80,12 @@ pub fn core_main() -> Option<Vec<String>> {
         }
         i += 1;
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    // EveryDesk has no `--tray` (the `tray` feature is off; a `--tray` launch exits at once):
+    // the logged-in app is the `--hidden` window started by the HKLM Run value.
+    #[cfg(all(
+        any(target_os = "linux", target_os = "windows"),
+        not(feature = "everydesk")
+    ))]
     if args.is_empty() {
         #[cfg(target_os = "linux")]
         let should_check_start_tray = crate::check_process("--server", false);

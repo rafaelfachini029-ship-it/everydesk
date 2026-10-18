@@ -153,6 +153,8 @@ fn poll_interval(hosting: bool) -> Duration {
 /// Starts the 5 s watcher (faster while it matters, see `poll_interval`); emits
 /// `service:status` on every change.
 pub fn start_watcher(app: AppHandle) {
+    #[cfg(windows)]
+    let _ = librustdesk::ipc::ON_EXIT_RECV_CLOSE.set(relaunch_on_close);
     std::thread::Builder::new()
         .name("everydesk-service".into())
         .spawn(move || {
@@ -201,10 +203,44 @@ fn hand_over(app: &AppHandle) {
         }
         let (_, _, _, exe) = librustdesk::platform::get_install_info();
         log::info!("everydesk: service is hosting now; handing over to {exe}");
-        if let Err(e) = win::spawn_relauncher(&exe, WaitFor::Nothing) {
-            log::error!("everydesk: relauncher: {e}");
+        if !RELAUNCH_PENDING.swap(true, Ordering::SeqCst) {
+            if let Err(e) = win::spawn_relauncher(&exe, WaitFor::Nothing) {
+                log::error!("everydesk: relauncher: {e}");
+            }
         }
         app.exit(0);
+    }
+}
+
+/// A relauncher is already waiting for this process to go (install/remove/hand-over): a
+/// second one would only start a duplicate window.
+#[cfg_attr(not(windows), allow(dead_code))]
+static RELAUNCH_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// `ipc::ON_EXIT_RECV_CLOSE`: a service started behind our back (NSIS while the portable app is
+/// open, `sc start`) has its `--server` send `Close` to this in-process host before the watcher
+/// noticed it; the engine then exits this process. Come back once the service runs.
+#[cfg(windows)]
+fn relaunch_on_close() {
+    if RELAUNCH_PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let exe = relaunch_exe();
+    log::info!("everydesk: closed by the service's host; relaunching {exe} once it runs");
+    if let Err(e) = win::spawn_relauncher(&exe, WaitFor::ServiceRunning) {
+        log::error!("everydesk: relauncher: {e}");
+    }
+}
+
+/// The installed exe when there is one, else this one.
+#[cfg(windows)]
+fn relaunch_exe() -> String {
+    if librustdesk::platform::is_installed() {
+        librustdesk::platform::get_install_info().3
+    } else {
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| librustdesk::platform::get_install_info().3)
     }
 }
 
@@ -218,10 +254,12 @@ pub enum WaitFor {
 }
 
 /// A `cmd` script (not EveryDesk.exe, so the installers' `taskkill /IM EveryDesk.exe` spares it)
-/// that waits up to ~3 min for `wait`, then starts `exe` a few seconds later. `None` when the
-/// path cannot be quoted safely.
+/// that waits up to ~3 min until process `pid` (the app that spawned it) is gone *and* `wait`
+/// holds, then starts `exe` a few seconds later; on timeout it launches nothing. Waiting for
+/// `pid` keeps it from starting a second window while the UAC prompt is still open. `None`
+/// when the path cannot be quoted safely.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn relaunch_script(service: &str, exe: &str, wait: WaitFor) -> Option<String> {
+pub fn relaunch_script(service: &str, exe: &str, pid: u32, wait: WaitFor) -> Option<String> {
     let bad = |s: &str| s.is_empty() || s.contains(['"', '\r', '\n']);
     if bad(service) || bad(exe) {
         return None;
@@ -229,22 +267,17 @@ pub fn relaunch_script(service: &str, exe: &str, wait: WaitFor) -> Option<String
     // `%` is the only character a quoted batch argument still expands.
     let exe = exe.replace('%', "%%");
     let service = service.replace('%', "%%");
-    let wait_loop = match wait {
-        WaitFor::Nothing => String::new(),
-        WaitFor::ServiceRunning | WaitFor::ServiceStopped => {
-            let cond = if wait == WaitFor::ServiceRunning {
-                "if not errorlevel 1 if exist \"{exe}\" goto launch"
-            } else {
-                "if errorlevel 1 goto launch"
-            };
-            format!(
-                "for /l %%i in (1,1,90) do (\r\n  sc query \"{service}\" | find \"RUNNING\" >nul\r\n  {}\r\n  ping -n 3 127.0.0.1 >nul\r\n)\r\nexit /b 0\r\n",
-                cond.replace("{exe}", &exe)
-            )
-        }
+    let ready = match wait {
+        WaitFor::Nothing => "goto launch".to_string(),
+        WaitFor::ServiceRunning => format!(
+            "sc query \"{service}\" | find \"RUNNING\" >nul\r\n    if not errorlevel 1 if exist \"{exe}\" goto launch"
+        ),
+        WaitFor::ServiceStopped => format!(
+            "sc query \"{service}\" | find \"RUNNING\" >nul\r\n    if errorlevel 1 goto launch"
+        ),
     };
     Some(format!(
-        "@echo off\r\n{wait_loop}:launch\r\nping -n 4 127.0.0.1 >nul\r\nstart \"\" \"{exe}\"\r\ndel \"%~f0\"\r\n"
+        "@echo off\r\nfor /l %%i in (1,1,90) do (\r\n  tasklist /FI \"PID eq {pid}\" /NH | find \" {pid} \" >nul\r\n  if errorlevel 1 (\r\n    {ready}\r\n  )\r\n  ping -n 3 127.0.0.1 >nul\r\n)\r\ndel \"%~f0\" & exit /b 0\r\n:launch\r\nping -n 4 127.0.0.1 >nul\r\nstart \"\" \"{exe}\"\r\ndel \"%~f0\"\r\n"
     ))
 }
 
@@ -256,17 +289,47 @@ mod win {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
-    pub fn spawn_relauncher(exe: &str, wait: WaitFor) -> Result<(), String> {
-        let script = relaunch_script(SERVICE_NAME, exe, wait).ok_or("caminho inválido")?;
-        let path = std::env::temp_dir().join("EveryDesk-relaunch.cmd");
+    /// Writes a fresh script (unique name: cmd reads a batch file while running it) and
+    /// starts it detached. The child is returned so a declined UAC prompt can cancel it.
+    pub fn spawn_relauncher(exe: &str, wait: WaitFor) -> Result<std::process::Child, String> {
+        let script = relaunch_script(SERVICE_NAME, exe, std::process::id(), wait)
+            .ok_or("caminho inválido")?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "EveryDesk-relaunch-{}-{nanos}.cmd",
+            std::process::id()
+        ));
         std::fs::write(&path, script).map_err(|e| e.to_string())?;
         std::process::Command::new("cmd")
             .arg("/c")
             .arg(&path)
             .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn()
-            .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+
+    /// Relauncher first, UAC second: once the prompt is accepted the elevated
+    /// `--install-service`/`--silent-install`/`--uninstall-service` runs `taskkill /IM
+    /// EveryDesk.exe`, which can hit this process before `run_uac` even returns. A declined
+    /// prompt kills the relauncher again (it would only time out, but never launch twice).
+    pub fn uac_with_relauncher(
+        uac_exe: &str,
+        arg: &str,
+        relaunch_exe: &str,
+        wait: WaitFor,
+    ) -> Result<(), String> {
+        let mut child = spawn_relauncher(relaunch_exe, wait)?;
+        super::RELAUNCH_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Err(e) = uac(uac_exe, arg) {
+            let _ = child.kill();
+            let _ = child.wait();
+            super::RELAUNCH_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// `--silent-install` XCOPYs the *directory* of the running exe into Program Files; a
@@ -304,20 +367,20 @@ const UNSUPPORTED: &str = "Disponível no Windows nesta versão.";
 /// - Portable: `--silent-install` from a staged copy installs to Program Files and creates the
 ///   service. (Preferred later: the NSIS setup the updater downloads, Task 7.)
 /// Both kill every other EveryDesk.exe (this window too) and, under the `everydesk` feature,
-/// never relaunch (`run_after_run_cmds`), so a detached unelevated relauncher starts the
-/// installed exe once the service runs.
+/// never relaunch (`run_after_run_cmds`), so a detached unelevated relauncher, started before
+/// the prompt, starts the installed exe once the service runs.
 #[tauri::command]
 pub fn install_permanent() -> Result<(), String> {
     #[cfg(windows)]
     {
         let (_, _, _, installed_exe) = librustdesk::platform::get_install_info();
+        let wait = WaitFor::ServiceRunning;
         if librustdesk::platform::is_installed() {
-            win::uac(&installed_exe, "--install-service")?;
+            win::uac_with_relauncher(&installed_exe, "--install-service", &installed_exe, wait)?;
         } else {
             let staged = win::stage_portable()?;
-            win::uac(&staged, "--silent-install")?;
+            win::uac_with_relauncher(&staged, "--silent-install", &installed_exe, wait)?;
         }
-        win::spawn_relauncher(&installed_exe, WaitFor::ServiceRunning)?;
         fast_poll_for(180);
         return Ok(());
     }
@@ -325,8 +388,9 @@ pub fn install_permanent() -> Result<(), String> {
     Err(UNSUPPORTED.into())
 }
 
-/// "Remover acesso permanente": removes the service, keeps the installed program (portable
-/// mode from then on). `--uninstall-service` kills every EveryDesk.exe and does not relaunch,
+/// "Remover acesso permanente": removes the service and its login autostart (the HKLM Run
+/// value, `--uninstall-service` drops it like the NSIS uninstaller), keeps the installed
+/// program (portable mode from then on). `--uninstall-service` kills every EveryDesk.exe and does not relaunch,
 /// so the relauncher brings this app back once the service stopped.
 #[tauri::command]
 pub fn uninstall_permanent() -> Result<(), String> {
@@ -341,8 +405,7 @@ pub fn uninstall_permanent() -> Result<(), String> {
                 .to_string_lossy()
                 .into_owned()
         };
-        win::uac(&exe, "--uninstall-service")?;
-        win::spawn_relauncher(&exe, WaitFor::ServiceStopped)?;
+        win::uac_with_relauncher(&exe, "--uninstall-service", &exe, WaitFor::ServiceStopped)?;
         return Ok(());
     }
     #[cfg(not(windows))]
@@ -415,19 +478,25 @@ mod tests {
     #[test]
     fn relaunch_script_quotes_and_waits() {
         let exe = r"C:\Program Files\EveryDesk\EveryDesk.exe";
-        let s = relaunch_script("EveryDesk", exe, WaitFor::ServiceRunning).unwrap();
+        let s = relaunch_script("EveryDesk", exe, 4242, WaitFor::ServiceRunning).unwrap();
+        // Waits for the spawning app to be gone first, every mode.
+        assert!(s.contains("tasklist /FI \"PID eq 4242\" /NH | find \" 4242 \""), "{s}");
         assert!(s.contains("sc query \"EveryDesk\" | find \"RUNNING\""), "{s}");
         assert!(s.contains(&format!("if not errorlevel 1 if exist \"{exe}\" goto launch")), "{s}");
         assert!(s.contains(&format!("start \"\" \"{exe}\"")), "{s}");
-        let s = relaunch_script("EveryDesk", exe, WaitFor::ServiceStopped).unwrap();
+        // Timeout: delete itself and launch nothing.
+        let timeout = s.find("exit /b 0").unwrap();
+        assert!(timeout < s.find(":launch").unwrap(), "{s}");
+        let s = relaunch_script("EveryDesk", exe, 1, WaitFor::ServiceStopped).unwrap();
         assert!(s.contains("if errorlevel 1 goto launch"), "{s}");
-        let s = relaunch_script("EveryDesk", exe, WaitFor::Nothing).unwrap();
+        let s = relaunch_script("EveryDesk", exe, 7, WaitFor::Nothing).unwrap();
         assert!(!s.contains("sc query"), "{s}");
+        assert!(s.contains("PID eq 7"), "{s}");
         assert!(s.contains(":launch"));
         // `%` doubled, quotes refused.
-        let s = relaunch_script("EveryDesk", r"C:\a%b\E.exe", WaitFor::Nothing).unwrap();
+        let s = relaunch_script("EveryDesk", r"C:\a%b\E.exe", 1, WaitFor::Nothing).unwrap();
         assert!(s.contains(r#""C:\a%%b\E.exe""#), "{s}");
-        assert!(relaunch_script("EveryDesk", "C:\\a\"b.exe", WaitFor::Nothing).is_none());
-        assert!(relaunch_script("EveryDesk", "", WaitFor::Nothing).is_none());
+        assert!(relaunch_script("EveryDesk", "C:\\a\"b.exe", 1, WaitFor::Nothing).is_none());
+        assert!(relaunch_script("EveryDesk", "", 1, WaitFor::Nothing).is_none());
     }
 }
