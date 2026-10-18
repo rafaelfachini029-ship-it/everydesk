@@ -767,6 +767,34 @@ fn import_config(path: &str) {
             log::info!("config2 written");
         }
     }
+    // EveryDesk: the host (the service's `--server`) reads the owner's trust book from its
+    // own config dir; bring the user's `pairings.json` along (best-effort). It is sealed
+    // with a key derived from the signing key in the `EveryDesk.toml` copied above.
+    #[cfg(feature = "everydesk")]
+    if let Some(src) = path.parent().map(|dir| dir.join("pairings.json")) {
+        let dst = Config::path("pairings.json");
+        if should_import_file(&src, &dst) {
+            match std::fs::copy(&src, &dst) {
+                Ok(_) => log::info!("pairings imported from {:?} to {:?}", src, dst),
+                Err(err) => log::warn!("pairings not imported from {:?}: {}", src, err),
+            }
+        } else {
+            log::info!(
+                "pairings not imported from {:?} (missing or not newer)",
+                src
+            );
+        }
+    }
+}
+
+/// `src` exists, is not `dst` itself, and is newer than `dst` (or `dst` is missing).
+#[cfg(feature = "everydesk")]
+fn should_import_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
+    use hbb_common::get_modified_time;
+    if !src.is_file() || src == dst {
+        return false;
+    }
+    !dst.exists() || get_modified_time(src) > get_modified_time(dst)
 }
 
 /// invoke a new connection
@@ -923,6 +951,37 @@ fn parse_silent_install_args(args: &[String]) -> (Option<bool>, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn should_import_file_only_when_source_is_newer() {
+        let dir = std::env::temp_dir().join(format!(
+            "everydesk-import-{}-{}",
+            std::process::id(),
+            hbb_common::get_time()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src-pairings.json");
+        let dst = dir.join("dst-pairings.json");
+        // Missing source: nothing to import.
+        assert!(!should_import_file(&src, &dst));
+        std::fs::write(&src, b"{}").unwrap();
+        // Missing destination: import.
+        assert!(should_import_file(&src, &dst));
+        // Same file: never.
+        assert!(!should_import_file(&src, &src));
+        // Destination newer than the source: keep it.
+        std::fs::write(&dst, b"{}").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert!(!should_import_file(&src, &dst));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

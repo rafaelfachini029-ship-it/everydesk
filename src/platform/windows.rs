@@ -1452,6 +1452,13 @@ pub fn check_update_broker_process() -> ResultType<()> {
 
 fn get_install_info_with_subkey(subkey: String) -> (String, String, String, String) {
     let mut path = get_reg_of(&subkey, "InstallLocation");
+    // EveryDesk: the Tauri NSIS installer writes `InstallLocation` quoted
+    // (`"C:\Program Files\EveryDesk"`); unquoted, `validate_install_value` accepts it and
+    // `exe` is a real path.
+    #[cfg(feature = "everydesk")]
+    {
+        path = path.trim().trim_matches('"').to_owned();
+    }
     if path.is_empty() {
         path = get_default_install_path();
     }
@@ -3325,19 +3332,29 @@ fn get_install_service_commands(path: &str, exe: &str) -> ResultType<String> {
             .to_str()
             .ok_or_else(|| anyhow!("Configuration path is not valid Unicode"))?,
     )?;
-    let shortcut_icon_location = get_custom_icon(path, exe);
-    if let Some(icon) = shortcut_icon_location.as_deref() {
-        validate_install_value(icon)?;
-    }
-    let tray_shortcut_commands =
-        embedded_tray_shortcut_commands(&app_name, exe, shortcut_icon_location.as_deref())?;
+    // EveryDesk has no `--tray` (the `tray` feature is off) and autostarts through the
+    // installer's HKLM Run value (`--hidden`), so no "Tray.lnk" in the Startup folder.
+    #[cfg(feature = "everydesk")]
+    let tray_commands = String::new();
+    #[cfg(not(feature = "everydesk"))]
+    let tray_commands = {
+        let shortcut_icon_location = get_custom_icon(path, exe);
+        if let Some(icon) = shortcut_icon_location.as_deref() {
+            validate_install_value(icon)?;
+        }
+        let tray_shortcut_commands =
+            embedded_tray_shortcut_commands(&app_name, exe, shortcut_icon_location.as_deref())?;
+        format!(
+            "{tray_shortcut_commands}
+copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\""
+        )
+    };
     let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
     Ok(format!(
         "
 chcp 65001
 taskkill /F /IM {app_name}.exe{filter}
-{tray_shortcut_commands}
-copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
+{tray_commands}
 {import_config}
 {create_service}
     ",
@@ -3955,14 +3972,35 @@ if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{ap
 ", app_name = crate::get_app_name())
     } else {
         let exe = escape_nested_cmd_ampersands(exe);
-        format!("
-sc create {app_name} binpath= \"\\\"{exe}\\\" --service\" start= auto DisplayName= \"{app_name} Service\"
+        format!(
+            "
+{create}
 sc start {app_name}
 ",
-    app_name = crate::get_app_name())
+            create = sc_create_service_command(&crate::get_app_name(), &exe),
+            app_name = crate::get_app_name()
+        )
     }
 }
 
+/// The `sc create` line that registers `exe --service` as the auto-start service `app_name`
+/// (`exe` already escaped for the nested cmd line).
+fn sc_create_service_command(app_name: &str, exe: &str) -> String {
+    format!(
+        "sc create {app_name} binpath= \"\\\"{exe}\\\" --service\" start= auto DisplayName= \"{app_name} Service\""
+    )
+}
+
+#[cfg(feature = "everydesk")]
+fn run_after_run_cmds(silent: bool) {
+    // EveryDesk: `--install-service` runs elevated from the NSIS installer, whose finish
+    // page reopens the app unelevated (RunAsUser); an elevated window here would be a
+    // second, admin, copy of the app. There is no `--tray` either (the `tray` feature is off).
+    log::debug!("run_after_run_cmds(silent={silent}): no relaunch under everydesk");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+#[cfg(not(feature = "everydesk"))]
 fn run_after_run_cmds(silent: bool) {
     let (_, _, _, exe) = get_install_info();
     if !silent {
@@ -4757,6 +4795,17 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_service_commands_contain_service_flag() {
+        let exe = "C:\\Program Files\\EveryDesk\\EveryDesk.exe";
+        let cmd = sc_create_service_command("EveryDesk", exe);
+        assert!(cmd.starts_with("sc create EveryDesk "));
+        // The service runs the quoted installed exe with `--service`, started at boot.
+        assert!(cmd.contains(&format!("binpath= \"\\\"{exe}\\\" --service\"")));
+        assert!(cmd.contains(" start= auto "));
+        assert!(cmd.contains("DisplayName= \"EveryDesk Service\""));
+    }
 
     // Test-only reusable Win32 HANDLE RAII helper.
     // If a future non-test path needs the same pattern, move it out of this test module.
