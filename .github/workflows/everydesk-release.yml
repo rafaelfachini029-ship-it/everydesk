@@ -1,0 +1,465 @@
+name: EveryDesk release
+
+# Signed Windows release of apps/everydesk, started by pushing a tag `v*` (docs/release.md).
+#
+#   build-sign (Environment `release`, needs Rafael's approval; the only job with secrets)
+#     1. checks the tag, the secrets and tauri.conf.json, failing early with a clear message;
+#     2. compiles WITHOUT secrets (dependency build scripts never see them);
+#     3. bundles the NSIS setup with Authenticode via bundle.windows.signCommand -> sign.ps1
+#        (SSL.com eSigner CodeSignTool, RFC 3161 timestamp) and the updater signature (.sig);
+#     4. signs the portable EveryDesk.exe with Authenticode, then with the updater key
+#        (`tauri signer sign --app-version`, after Authenticode so the .sig covers the final
+#        bytes);
+#     5. `signtool verify /pa /v` on every PE (setup, portable, files inside the setup);
+#     6. writes latest.json (windows-x86_64 + windows-x86_64-portable) and checks both
+#        signatures against the updater public key in tauri.conf.json.
+#   publish (no secrets, the only job with `contents: write`)
+#     SHA256SUMS + `gh release create` (pre-release for tags like v0.1.0-rc1).
+#
+# signCommand and createUpdaterArtifacts are passed with `--config`, never committed to
+# tauri.conf.json, so everydesk-windows.yml and local builds stay unsigned and secret-free.
+# No packers or obfuscation (antivirus false positives).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: everydesk-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LLVM_VERSION: "15.0.6"
+  # Must match "builtin-baseline" in vcpkg.json.
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  # Read-only: a release reuses the binary cache but never writes to it.
+  VCPKG_BINARY_SOURCES: "clear;x-gha,read"
+  VCPKG_DEFAULT_TRIPLET: "x64-windows-static"
+  RUST_TARGET: "x86_64-pc-windows-msvc"
+  # tauri-cli that writes `version:` into the updater signature (--app-version).
+  TAURI_CLI_VERSION: "2.12.3"
+  # SSL.com CodeSignTool, pinned. Its SHA-256 lives in the variable CODESIGNTOOL_SHA256
+  # (docs/release.md); the download is refused when it does not match.
+  CODESIGNTOOL_VERSION: "v1.3.2"
+
+jobs:
+  build-sign:
+    name: build and sign (Windows x64)
+    runs-on: windows-2022
+    environment: release
+    permissions:
+      contents: read
+    timeout-minutes: 240
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+      esigner_env: ${{ steps.check.outputs.esigner_env }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check tag, secrets and config
+        id: check
+        env:
+          TAG: ${{ github.ref_name }}
+          ESIGNER_ENV: ${{ vars.ESIGNER_ENV }}
+          HAS_ES_USERNAME: ${{ secrets.ES_USERNAME != '' }}
+          HAS_ES_PASSWORD: ${{ secrets.ES_PASSWORD != '' }}
+          HAS_ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID != '' }}
+          HAS_ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET != '' }}
+          HAS_TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          HAS_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
+          CODESIGNTOOL_SHA256: ${{ vars.CODESIGNTOOL_SHA256 }}
+        run: |
+          $errors = @()
+          if ($env:TAG -notmatch '^v((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$') {
+            Write-Host "::error::A tag '$env:TAG' não é uma versão válida (ex.: v0.1.0 ou v0.1.0-rc1)."
+            exit 1
+          }
+          $version = $env:TAG.Substring(1)
+          $core = $Matches[1]
+          # Any suffix (-rc1, -beta.2) makes a GitHub pre-release.
+          $prerelease = [bool]$Matches[5]
+
+          $conf = Get-Content apps/everydesk/tauri.conf.json -Raw | ConvertFrom-Json
+          if ($core -and $conf.version -ne $core) {
+            $errors += "A tag $env:TAG não bate com version '$($conf.version)' em apps/everydesk/tauri.conf.json. Atualize o arquivo (ou a tag) antes do release."
+          }
+
+          foreach ($name in 'ES_USERNAME','ES_PASSWORD','ES_CREDENTIAL_ID','ES_TOTP_SECRET','TAURI_SIGNING_PRIVATE_KEY','TAURI_SIGNING_PRIVATE_KEY_PASSWORD') {
+            if ([Environment]::GetEnvironmentVariable("HAS_$name") -ne 'true') {
+              $errors += "Falta o segredo $name no Environment 'release' (docs/release.md)."
+            }
+          }
+          if (-not ($env:CODESIGNTOOL_SHA256 -match '^[0-9A-Fa-f]{64}$')) {
+            $errors += "Falta a variável CODESIGNTOOL_SHA256 (SHA-256 do CodeSignTool $env:CODESIGNTOOL_VERSION) no Environment 'release' (docs/release.md)."
+          }
+
+          $esignerEnv = if ($env:ESIGNER_ENV -eq 'TEST') { 'TEST' } else { 'PROD' }
+          if ($esignerEnv -eq 'TEST' -and -not $prerelease) {
+            $errors += "ESIGNER_ENV=TEST (sandbox) só é permitido em tags de teste como v0.1.0-rc1: um release normal com assinatura de teste chegaria aos usuários pelo updater."
+          }
+
+          $pubkey = $conf.plugins.updater.pubkey
+          if ($pubkey -eq 'COLE_AQUI_A_CHAVE_PUBLICA_DO_UPDATER') {
+            if ($prerelease) {
+              Write-Host "::warning::A chave pública do updater ainda é o marcador: esta versão nunca vai se atualizar sozinha."
+            } else {
+              $errors += "plugins.updater.pubkey em tauri.conf.json ainda é o marcador. Cole a chave pública (docs/release.md, 'Chave do updater')."
+            }
+          }
+
+          if ($errors) {
+            foreach ($e in $errors) { Write-Host "::error::$e" }
+            exit 1
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          "esigner_env=$esignerEnv" >> $env:GITHUB_OUTPUT
+          Write-Host "Release $version (pre-release: $prerelease, eSigner: $esignerEnv)"
+
+      - name: Test the latest.json generator
+        run: python -I apps/everydesk/windows/test_make_latest_json.py
+
+      # ---- toolchain: same setup as everydesk-windows.yml --------------------------------
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2.0.9
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Set LIBCLANG_PATH
+        shell: bash
+        run: echo "LIBCLANG_PATH=${LLVM_PATH}\\bin" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: everydesk-windows-2022
+          workspaces: ". -> target"
+          save-if: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/everydesk/ui/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm --dir apps/everydesk/ui install --frozen-lockfile
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_DEFAULT_TRIPLET }}
+        run: |
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet ${{ env.VCPKG_DEFAULT_TRIPLET }} \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "${{ env.TAURI_CLI_VERSION }}" --locked
+
+      # ---- signing tools -------------------------------------------------------------------
+      - name: Install SSL.com CodeSignTool (pinned, checksum verified)
+        env:
+          CODESIGNTOOL_SHA256: ${{ vars.CODESIGNTOOL_SHA256 }}
+          ESIGNER_ENV: ${{ steps.check.outputs.esigner_env }}
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "CodeSignTool-$env:CODESIGNTOOL_VERSION-windows.zip"
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/$env:CODESIGNTOOL_VERSION/CodeSignTool-$env:CODESIGNTOOL_VERSION-windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash
+          if ($hash -ne $env:CODESIGNTOOL_SHA256.ToUpper()) {
+            Write-Host "::error::CodeSignTool $env:CODESIGNTOOL_VERSION tem SHA-256 $hash, diferente de CODESIGNTOOL_SHA256. Nada foi assinado."
+            exit 1
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'codesigntool'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          $jar = Get-ChildItem -LiteralPath $dir -Recurse -Filter 'code_sign_tool-*.jar' | Select-Object -First 1
+          if (-not $jar) { Write-Host '::error::code_sign_tool-*.jar não encontrado no zip.'; exit 1 }
+          $home_ = $jar.Directory.Parent.FullName
+          # Same properties SSL.com's own action writes: TEST = eSigner sandbox, else production.
+          if ($env:ESIGNER_ENV -eq 'TEST') {
+            $props = @(
+              'CLIENT_ID=qOUeZCCzSqgA93acB3LYq6lBNjgZdiOxQc-KayC3UMw'
+              'OAUTH2_ENDPOINT=https://oauth-sandbox.ssl.com/oauth2/token'
+              'CSC_API_ENDPOINT=https://cs-try.ssl.com'
+              'TSA_URL=http://ts.ssl.com'
+              'TSA_LEGACY_URL=http://ts.ssl.com/legacy'
+            )
+          } else {
+            $props = @(
+              'CLIENT_ID=kaXTRACNijSWsFdRKg_KAfD3fqrBlzMbWs6TwWHwAn8'
+              'OAUTH2_ENDPOINT=https://login.ssl.com/oauth2/token'
+              'CSC_API_ENDPOINT=https://cs.ssl.com'
+              'TSA_URL=http://ts.ssl.com'
+              'TSA_LEGACY_URL=http://ts.ssl.com/legacy'
+            )
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $home_ 'conf') | Out-Null
+          Set-Content -LiteralPath (Join-Path $home_ 'conf/code_sign_tool.properties') -Value $props -Encoding ascii
+          "CODESIGNTOOL_DIR=$home_" >> $env:GITHUB_ENV
+          Write-Host "CodeSignTool $env:CODESIGNTOOL_VERSION em $home_ (eSigner $env:ESIGNER_ENV)"
+
+      - name: Locate signtool
+        run: |
+          $st = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $st) { Write-Host '::error::signtool.exe não encontrado'; exit 1 }
+          "SIGNTOOL=$($st.FullName)" >> $env:GITHUB_ENV
+          Write-Host $st.FullName
+
+      # ---- build ------------------------------------------------------------------------------
+      - name: Write the release configs
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          $sign = (Resolve-Path apps/everydesk/windows/sign.ps1).Path
+          $compile = @{ version = $env:VERSION }
+          $release = @{
+            version = $env:VERSION
+            bundle = @{
+              createUpdaterArtifacts = $true
+              windows = @{
+                signCommand = @{
+                  cmd = 'pwsh'
+                  args = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $sign, '%1')
+                }
+              }
+            }
+          }
+          $compile | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $env:RUNNER_TEMP 'compile.json') -Encoding utf8
+          $release | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $env:RUNNER_TEMP 'release.json') -Encoding utf8
+          Get-Content (Join-Path $env:RUNNER_TEMP 'release.json')
+
+      - name: Compile (no secrets)
+        working-directory: apps/everydesk
+        run: cargo tauri build --no-bundle --features hwcodec --config "$env:RUNNER_TEMP/compile.json"
+
+      - name: Bundle and sign the NSIS setup
+        working-directory: apps/everydesk
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $env:EVERYDESK_SIGN_LOG = Join-Path $env:RUNNER_TEMP 'sign.log'
+          cargo tauri build --bundles nsis --features hwcodec --config "$env:RUNNER_TEMP/release.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect the release files
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $setup = "target/release/bundle/nsis/EveryDesk_$($env:VERSION)_x64-setup.exe"
+          foreach ($f in $setup, "$setup.sig", 'target/release/EveryDesk.exe') {
+            if (-not (Test-Path -LiteralPath $f)) { Write-Host "::error::Faltou $f"; Get-ChildItem target/release/bundle/nsis; exit 1 }
+          }
+          # tauri restores target/release/EveryDesk.exe unsigned after bundling: it becomes the
+          # portable and is signed below.
+          Copy-Item $setup, "$setup.sig", target/release/EveryDesk.exe dist/
+          Copy-Item LICENCE dist/LICENCE
+          Get-ChildItem dist
+
+      - name: Authenticode-sign the portable exe
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          ES_CREDENTIAL_ID: ${{ secrets.ES_CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          $env:EVERYDESK_SIGN_LOG = Join-Path $env:RUNNER_TEMP 'sign.log'
+          pwsh -NoProfile -NonInteractive -File apps/everydesk/windows/sign.ps1 dist/EveryDesk.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify Authenticode on every PE
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          ESIGNER_ENV: ${{ steps.check.outputs.esigner_env }}
+        run: |
+          $failed = $false
+
+          # 1. Every call of sign.ps1 succeeded, and the uninstaller was signed too (makensis
+          #    ignores the exit code of the uninstaller signing command).
+          $log = Get-Content (Join-Path $env:RUNNER_TEMP 'sign.log')
+          $log | ForEach-Object { Write-Host "sign.log: $_" }
+          if ($log -match '^FAIL ') { Write-Host '::error::sign.ps1 falhou em algum arquivo (sign.log).'; $failed = $true }
+          $setupName = "EveryDesk_$($env:VERSION)_x64-setup.exe"
+          $other = $log | Where-Object { $_ -match '^OK ' } |
+            Where-Object { $_ -notmatch '\.dll$' -and $_ -notmatch [regex]::Escape($setupName) -and $_ -notmatch '\\EveryDesk\.exe$' }
+          if (-not $other) { Write-Host '::error::O desinstalador não aparece como assinado em sign.log.'; $failed = $true }
+
+          # 2. The released files and every PE inside the setup.
+          $pes = @(Get-Item "dist/$setupName", dist/EveryDesk.exe)
+          $inner = Join-Path $env:RUNNER_TEMP 'setup-contents'
+          $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue
+          if (-not $sevenZip) { $sevenZip = Get-Command 'C:\Program Files\7-Zip\7z.exe' -ErrorAction SilentlyContinue }
+          if ($sevenZip) { & $sevenZip.Source x -y "-o$inner" "dist/$setupName" | Out-Null }
+          if ($sevenZip -and $LASTEXITCODE -eq 0) {
+            $pes += Get-ChildItem $inner -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' }
+          } else {
+            Write-Host '::warning::7-Zip não abriu o setup; os arquivos internos foram conferidos só pelo sign.log.'
+          }
+          # DLLs that Tauri signs (NSIS_PLUGIN_FILES in tauri-bundler). Other NSIS plugins in the
+          # setup (nsExec.dll, used by windows/hooks.nsh) come unsigned from the NSIS
+          # distribution and Tauri gives no hook to sign them: reported, not fatal.
+          $tauriSigned = 'NSISdl.dll', 'StartMenu.dll', 'System.dll', 'nsDialogs.dll', 'nsis_tauri_utils.dll'
+          foreach ($pe in $pes) {
+            if ($pe.Extension -eq '.dll' -and $pe.Name -notin $tauriSigned) {
+              $s = Get-AuthenticodeSignature -LiteralPath $pe.FullName
+              if (-not $s.SignerCertificate) { Write-Host "::warning::$($pe.Name) (plugin NSIS) sem assinatura." }
+              continue
+            }
+            Write-Host "=== $($pe.FullName)"
+            $out = & $env:SIGNTOOL verify /pa /v $pe.FullName 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host $out
+            $sig = Get-AuthenticodeSignature -LiteralPath $pe.FullName
+            if (-not $sig.SignerCertificate -or -not $sig.TimeStamperCertificate) {
+              Write-Host "::error::$($pe.Name) sem assinatura ou sem carimbo de tempo."; $failed = $true
+            } elseif ($env:ESIGNER_ENV -eq 'TEST') {
+              # The sandbox certificate does not chain to a root Windows trusts.
+              if ($code -ne 0) { Write-Host "::warning::$($pe.Name): assinatura de TESTE (sandbox), raiz não confiável, como esperado." }
+            } elseif ($code -ne 0 -or $out -notmatch 'The signature is timestamped') {
+              Write-Host "::error::signtool verify /pa falhou em $($pe.Name)."; $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Updater-sign the portable exe (after Authenticode)
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          cargo tauri signer sign --app-version $env:VERSION dist/EveryDesk.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Write latest.json
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          PRERELEASE: ${{ steps.check.outputs.prerelease }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          $require = if ($env:PRERELEASE -eq 'true') { @() } else { @('--require-pubkey') }
+          python -I apps/everydesk/windows/make_latest_json.py `
+            --version $env:VERSION `
+            --base-url "https://github.com/$env:REPO/releases/download/$env:TAG" `
+            --setup "dist/EveryDesk_$($env:VERSION)_x64-setup.exe" `
+            --portable dist/EveryDesk.exe `
+            --pubkey-from-conf apps/everydesk/tauri.conf.json @require `
+            --notes "EveryDesk $env:VERSION" `
+            --out dist/latest.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content dist/latest.json
+
+      - name: Upload the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: everydesk-release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish GitHub release
+    needs: build-sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release files
+        uses: actions/download-artifact@v4
+        with:
+          name: everydesk-release
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build-sign.outputs.version }}
+          PRERELEASE: ${{ needs.build-sign.outputs.prerelease }}
+          ESIGNER_ENV: ${{ needs.build-sign.outputs.esigner_env }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          setup="EveryDesk_${VERSION}_x64-setup.exe"
+          files=("$setup" "$setup.sig" EveryDesk.exe EveryDesk.exe.sig latest.json LICENCE)
+          for f in "${files[@]}"; do test -s "$f" || { echo "::error::faltou $f"; exit 1; }; done
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+          {
+            if [ "$ESIGNER_ENV" = "TEST" ]; then
+              echo "> **Versão de TESTE assinada no sandbox do eSigner. Não instale fora de testes.**"
+              echo
+            fi
+            echo "EveryDesk ${VERSION} para Windows 10/11 (64 bits)."
+            echo
+            echo "- \`${setup}\`: instalador (acesso permanente, inicia com o Windows)."
+            echo "- \`EveryDesk.exe\`: versão portátil, roda sem instalar."
+            echo
+            echo "Confira o arquivo baixado com \`SHA256SUMS\` (PowerShell: \`Get-FileHash EveryDesk.exe\`)."
+            echo "Código-fonte (AGPL-3.0): https://github.com/${REPO}/tree/${TAG}"
+          } > notes.md
+
+          flags=(--verify-tag --title "EveryDesk ${VERSION}" --notes-file notes.md)
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease --latest=false)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "$TAG" --repo "$REPO" "${flags[@]}" "${files[@]}" SHA256SUMS
