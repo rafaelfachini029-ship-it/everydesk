@@ -4,6 +4,7 @@ mod contacts;
 mod files;
 mod record;
 mod server;
+mod service;
 mod session;
 pub mod memorable;
 
@@ -38,11 +39,23 @@ fn get_server_status() -> String {
 
 /// `core_main` returns `None` when it handled a command-line mode itself (`--server`,
 /// `--check-hwcodec-config`, `--get-id`, `--password`, `--option`, ...), and `Some(args)` for
-/// what is left to the UI. Only a plain launch opens the EveryDesk window; leftover args
-/// (e.g. `--cm`, which this app never needs: it serves `_cm` itself) exit instead.
-fn should_start_gui(core_main_result: Option<&[String]>) -> bool {
-    matches!(core_main_result, Some(args) if args.is_empty())
+/// what is left to the UI. Only a plain launch or `--hidden` opens the EveryDesk window
+/// (`Some(hidden)`: `--hidden` starts it hidden, e.g. at login next to the service; it shows
+/// itself on an incoming request or a re-launch); other leftover args (e.g. `--cm`, which this
+/// app never needs: it serves `_cm` itself) exit instead.
+fn gui_launch(core_main_result: Option<&[String]>) -> Option<bool> {
+    match core_main_result? {
+        [] => Some(false),
+        [a] if a == HIDDEN_ARG => Some(true),
+        _ => None,
+    }
 }
+
+const HIDDEN_ARG: &str = "--hidden";
+/// IPC postfix of the "show the window" listener (one app window per user session).
+const SHOW_IPC: &str = "_show";
+/// Host events that need someone at the window: a hidden app shows itself for them.
+const ATTENTION_EVENTS: [&str; 4] = ["cm:incoming", "cm:reconfirm", "cm:pair_offer", "cm:elevation"];
 
 /// Product name. The engine derives the config/log dirs, IPC socket/pipe names, service
 /// name and macOS plists from `hbb_common::config::APP_NAME`.
@@ -75,8 +88,12 @@ pub fn main() {
     server::apply_server_config();
     cm::force_click_approve_mode();
     let res = librustdesk::core_main::core_main();
-    if should_start_gui(res.as_deref()) {
-        run();
+    if let Some(hidden) = gui_launch(res.as_deref()) {
+        if forward_to_running_window() {
+            log::info!("everydesk: already open in this session; showed that window");
+            return;
+        }
+        run(hidden);
     } else if let Some(args) = res {
         log::warn!("everydesk: unsupported arguments, exiting: {args:?}");
     }
@@ -107,7 +124,65 @@ fn log_name(args: &[String]) -> String {
     }
 }
 
-fn run() {
+/// A second launch shows the window of the one already running (also the way back to a
+/// `--hidden` app) instead of opening a second app that would fight over the `_cm` IPC.
+fn forward_to_running_window() -> bool {
+    block_on(async {
+        match librustdesk::ipc::connect(500, SHOW_IPC).await {
+            Ok(mut conn) => conn.send(&librustdesk::ipc::Data::Empty).await.is_ok(),
+            Err(_) => false,
+        }
+    })
+    .unwrap_or(false)
+}
+
+fn block_on<F: std::future::Future>(f: F) -> Option<F::Output> {
+    match hbb_common::tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => Some(rt.block_on(f)),
+        Err(e) => {
+            log::error!("everydesk: tokio runtime: {e}");
+            None
+        }
+    }
+}
+
+fn start_show_listener(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("everydesk-show".into())
+        .spawn(move || serve_show(app))
+        .expect("spawn show thread");
+}
+
+fn serve_show(app: tauri::AppHandle) {
+    block_on(async move {
+        match librustdesk::ipc::new_listener(SHOW_IPC).await {
+            Ok(mut incoming) => {
+                while let Some(conn) = incoming.next().await {
+                    if conn.is_ok() {
+                        show_main(&app);
+                    }
+                }
+            }
+            Err(e) => log::warn!("everydesk: show ipc: {e}"),
+        }
+    });
+}
+
+fn show_main(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+#[tauri::command]
+fn window_show(app: tauri::AppHandle) {
+    show_main(&app);
+}
+
+fn run(hidden: bool) {
     log::info!(
         "everydesk: server={} id={}",
         server::EVERYDESK_SERVER,
@@ -128,20 +203,41 @@ fn run() {
                 files::register_dropped_paths(paths);
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             // `_cm` first, so the host's first login finds it (`try_start_cm`) and the
             // engine never spawns a `--cm` window.
             cm::start(app.handle().clone());
             contacts::start(app.handle().clone());
             files::start(app.handle());
-            // As the Sciter GUI did in core_main: reuse a running `--server` over IPC,
-            // otherwise start the host (IPC + rendezvous registration) in this process.
-            std::thread::spawn(|| librustdesk::start_server(false, false));
+            start_show_listener(app.handle().clone());
+            if hidden {
+                use tauri::Manager;
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            for ev in ATTENTION_EVENTS {
+                use tauri::Listener;
+                let h = app.handle().clone();
+                app.listen_any(ev, move |_| show_main(&h));
+            }
+            // Service mode: the service's `--server` hosts; only sync config with it over IPC,
+            // retrying until it answers, and never host here (`no_server`). Otherwise, as the
+            // Sciter GUI did in core_main: reuse a running `--server` over IPC, or start the host
+            // (IPC + rendezvous registration) in this process.
+            let service_mode = service::is_service_mode();
+            log::info!("everydesk: service mode {service_mode}");
+            std::thread::spawn(move || librustdesk::start_server(false, service_mode));
+            service::start_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_my_id,
             get_server_status,
+            window_show,
+            service::service_status,
+            service::install_permanent,
+            service::uninstall_permanent,
             commands::session_connect,
             commands::session_close,
             commands::session_login,
@@ -188,7 +284,10 @@ fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_name, should_start_gui};
+    use super::{gui_launch, log_name};
+    fn should_start_gui(r: Option<&[String]>) -> bool {
+        gui_launch(r).is_some()
+    }
 
     #[test]
     fn app_name_is_everydesk() {
@@ -221,5 +320,13 @@ mod tests {
         assert!(!should_start_gui(Some(&["--cm".to_owned()])));
         let unknown = ["--unknown".to_owned(), "x".to_owned()];
         assert!(!should_start_gui(Some(&unknown)));
+    }
+
+    #[test]
+    fn hidden_launch() {
+        assert_eq!(gui_launch(Some(&[])), Some(false));
+        assert_eq!(gui_launch(Some(&["--hidden".to_owned()])), Some(true));
+        assert_eq!(gui_launch(Some(&["--hidden".to_owned(), "x".to_owned()])), None);
+        assert_eq!(gui_launch(None), None);
     }
 }

@@ -2,7 +2,8 @@
   SettingsPanel — the single quiet corner button and what sits behind it: the theme, and what
   someone who accesses this machine may do (four plain switches: files, sound, recording,
   clipboard; `cm_get_permissions` / `cm_set_permission`, which also applies to whoever is
-  connected now). A disclosure: the gear says whether
+  connected now), and permanent access (`service_status`, kept current by `service:status`;
+  `install_permanent` / `uninstall_permanent`, one UAC prompt; Windows only). A disclosure: the gear says whether
   it is open (aria-expanded/aria-controls); Escape or "Fechar" closes it and puts the focus
   back on the gear.
 -->
@@ -14,6 +15,42 @@
   import Toggle from '../cards/Toggle.svelte'
   import { PERMISSION_ROWS, type PermissionName, type Permissions } from '../host/files.ts'
   import { applyTheme, storedTheme, type Theme } from './theme.ts'
+  import { listen } from '@tauri-apps/api/event'
+  import { SERVICE_EVENT, serviceError, serviceView, type ServiceStatus } from './service.ts'
+
+  let service = $state<ServiceStatus | null>(null)
+  let serviceBusy = $state(false)
+  let serviceMsg = $state('')
+  const view = $derived(serviceView(service))
+
+  async function loadService() {
+    try {
+      service = await invoke<ServiceStatus>('service_status')
+    } catch (e) {
+      console.warn('everydesk: service_status', e)
+    }
+  }
+
+  async function runService() {
+    if (!view.action || view.disabled || serviceBusy) return
+    serviceBusy = true
+    serviceMsg = ''
+    try {
+      await invoke(view.action.command)
+      serviceMsg = 'Pronto. O EveryDesk vai fechar e abrir de novo em alguns segundos.'
+    } catch (e) {
+      serviceMsg = serviceError(e)
+    } finally {
+      serviceBusy = false
+    }
+  }
+
+  $effect(() => {
+    const off = listen<ServiceStatus>(SERVICE_EVENT, (e) => (service = e.payload))
+    return () => {
+      off.then((f) => f())
+    }
+  })
 
   let perms = $state<Permissions | null>(null)
   let permError = $state('')
@@ -40,7 +77,10 @@
   }
 
   $effect(() => {
-    if (open) loadPerms()
+    if (open) {
+      loadPerms()
+      loadService()
+    }
   })
 
   let open = $state(false)
@@ -103,6 +143,22 @@
         {/if}
         <p id="perms-hint" class="perms-hint">Vale também para quem já está conectado.</p>
         {#if permError}<p class="perms-error" role="alert">{permError}</p>{/if}
+      </div>
+      <div class="opt service" role="group" aria-labelledby="service-label" aria-describedby="service-hint">
+        <span id="service-label">Acesso permanente</span>
+        <p class="service-status" data-tone={view.tone} aria-live="polite">
+          <span class="dot" aria-hidden="true"></span>{view.status}
+        </p>
+        {#if view.action}
+          <Button
+            variant={view.action.variant}
+            loading={serviceBusy}
+            disabled={view.disabled}
+            onclick={runService}>{view.action.label}</Button
+          >
+        {/if}
+        {#if view.hint}<p id="service-hint" class="perms-hint">{view.hint}</p>{/if}
+        {#if serviceMsg}<p class="service-msg" role="status">{serviceMsg}</p>{/if}
       </div>
     </div>
   {/if}
@@ -182,6 +238,37 @@
   }
   .perms-error {
     color: var(--danger);
+  }
+  .service-status {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    margin: 0;
+    color: var(--text);
+  }
+  .dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 1.5px solid var(--line-strong);
+    transform: translateY(-1px);
+  }
+  [data-tone='on'] .dot {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+  [data-tone='warn'] .dot {
+    border-color: var(--warn);
+    background: var(--warn);
+  }
+  [data-tone='warn'] {
+    color: var(--warn);
+  }
+  .service-msg {
+    margin: 0;
+    font-size: var(--fs-label);
+    color: var(--text);
   }
   .switch {
     display: grid;
