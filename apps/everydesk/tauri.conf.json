@@ -3,6 +3,7 @@
   "productName": "EveryDesk",
   "version": "0.1.0",
   "identifier": "br.com.everydesk.app",
+  "mainBinaryName": "EveryDesk",
   "build": {
     "frontendDist": "ui/dist",
     "devUrl": "http://localhost:5173",
@@ -28,7 +29,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
+    "publisher": "Rafael Fachini",
+    "copyright": "© 2026 Rafael Fachini. Baseado no RustDesk (AGPL-3.0).",
+    "category": "Utility",
+    "shortDescription": "Acesso remoto ao seu computador",
+    "longDescription": "EveryDesk é um aplicativo de acesso remoto: permite controlar outro computador ou deixar que alguém de confiança acesse o seu, com conexão criptografada.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -36,6 +44,23 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "licenseFile": "../../LICENCE",
+    "resources": {
+      "../../LICENCE": "LICENCE.txt"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": [
+          "PortugueseBR"
+        ],
+        "displayLanguageSelector": false,
+        "installerHooks": "windows/hooks.nsh"
+      }
+    },
     "macOS": {
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist"

@@ -4,6 +4,8 @@ name: EveryDesk Windows build
 # Adapted from the upstream job `build-for-windows-flutter`
 # (.github/workflows-upstream/flutter-build.yml), keeping only what the
 # Tauri build needs (no Flutter, no bridge, no drivers, no signing).
+# Produces two artifacts from one build: the portable EveryDesk.exe and the
+# NSIS installer EveryDesk_<version>_x64-setup.exe (both unsigned).
 
 on:
   push:
@@ -109,13 +111,28 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      - name: Build EveryDesk
+      - name: Build EveryDesk (portable exe + NSIS installer)
         working-directory: apps/everydesk
-        run: cargo tauri build --no-bundle --features hwcodec
+        # One build: tauri-cli compiles target/release/EveryDesk.exe (renamed
+        # via mainBinaryName) and then wraps that same exe in the NSIS setup.
+        run: cargo tauri build --bundles nsis --features hwcodec
 
-      - name: Upload artifact
+      - name: List build outputs
+        shell: bash
+        run: |
+          ls -la target/release/*.exe
+          ls -la target/release/bundle/nsis/
+
+      - name: Upload portable exe
         uses: actions/upload-artifact@v4
         with:
-          name: everydesk-windows-x64
-          path: target/release/everydesk.exe
+          name: everydesk-windows-x64-portable
+          path: target/release/EveryDesk.exe
+          if-no-files-found: error
+
+      - name: Upload NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: everydesk-windows-x64-setup
+          path: target/release/bundle/nsis/EveryDesk_*_x64-setup.exe
           if-no-files-found: error
