@@ -78,6 +78,10 @@ pub fn apply_branding() {
 /// Process entry point. The host spawns this same exe with engine modes (hwcodec probe,
 /// service, CLI settings); those must run headless, never as a second app window.
 pub fn main() {
+    // Before anything can `LoadLibrary`: the exe may run (even elevated, "Instalar") from a
+    // user-writable folder like Downloads, so never search it (or the CWD) for DLLs.
+    #[cfg(windows)]
+    librustdesk::platform::windows::harden_dll_search();
     // Branding first: every path below (log, config, IPC) is derived from APP_NAME.
     apply_branding();
     // Same per-mode log directory core_main would pick, except a plain launch logs under

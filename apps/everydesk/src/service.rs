@@ -342,18 +342,6 @@ mod win {
         Ok(())
     }
 
-    /// `--silent-install` XCOPYs the *directory* of the running exe into Program Files; a
-    /// portable exe usually sits in Downloads, so copy it alone into a fresh folder first.
-    pub fn stage_portable() -> Result<String, String> {
-        let cur = std::env::current_exe().map_err(|e| e.to_string())?;
-        let dir = std::env::temp_dir().join("EveryDesk-setup");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let dst = dir.join(format!("{}.exe", SERVICE_NAME));
-        std::fs::copy(&cur, &dst).map_err(|e| e.to_string())?;
-        Ok(dst.to_string_lossy().into_owned())
-    }
-
     pub fn uac(exe: &str, arg: &str) -> Result<(), String> {
         match librustdesk::platform::run_uac(exe, arg) {
             Ok(true) => Ok(()),
@@ -374,8 +362,10 @@ const UNSUPPORTED: &str = "Disponível no Windows nesta versão.";
 /// "Instalar para acesso permanente" (and "Reiniciar serviço"). One UAC prompt.
 /// - Already installed (NSIS or an earlier install): `--install-service` recreates/starts the
 ///   service.
-/// - Portable: `--silent-install` from a staged copy installs to Program Files and creates the
-///   service. (Preferred later: the NSIS setup the updater downloads, Task 7.)
+/// - Portable: this very exe is elevated with `--silent-install`, which copies only the exe
+///   (never its folder, see `librustdesk::everydesk::install`) to Program Files and creates the
+///   service. No staging copy in `%TEMP%`: a user-writable folder the elevated process runs
+///   from is where a planted DLL would get loaded or installed.
 /// Both kill every other EveryDesk.exe (this window too) and, under the `everydesk` feature,
 /// never relaunch (`run_after_run_cmds`), so a detached unelevated relauncher, started before
 /// the prompt, starts the installed exe once the service runs.
@@ -388,8 +378,9 @@ pub fn install_permanent() -> Result<(), String> {
         if librustdesk::platform::is_installed() {
             win::uac_with_relauncher(&installed_exe, "--install-service", &installed_exe, wait)?;
         } else {
-            let staged = win::stage_portable()?;
-            win::uac_with_relauncher(&staged, "--silent-install", &installed_exe, wait)?;
+            let cur = std::env::current_exe().map_err(|e| e.to_string())?;
+            let cur = cur.to_string_lossy();
+            win::uac_with_relauncher(&cur, "--silent-install", &installed_exe, wait)?;
         }
         fast_poll_for(180);
         return Ok(());

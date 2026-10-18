@@ -389,3 +389,36 @@ git tag v0.1.0-rc1
 ```sh
 git push origin v0.1.0-rc1
 ```
+
+## 9. Instalador oficial
+
+O **instalador oficial** é o setup NSIS (`EveryDesk_x.y.z_x64-setup.exe`). É ele que deve ser
+indicado para quem vai deixar o EveryDesk instalado.
+
+O botão **Instalar para acesso permanente** do portátil (`EveryDesk.exe`) também funciona e é
+suportado. Ele pede permissão de administrador uma vez e usa o instalador do motor (o mesmo
+`EveryDesk.exe`, com `--silent-install`):
+
+- copia **só o `EveryDesk.exe`** para `C:\Program Files\EveryDesk` (nunca a pasta de onde o
+  portátil foi aberto, como Downloads);
+- cria o serviço do Windows e a inicialização automática;
+- grava a mesma chave de desinstalação do setup NSIS
+  (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\EveryDesk`), então o EveryDesk
+  aparece uma vez só em **Configurações → Aplicativos**.
+
+Depois disso, o updater atualiza essa instalação normalmente: baixa o setup NSIS e o executa
+com `/UPDATE`, na mesma pasta. O que esperar na primeira atualização: a entrada em
+**Aplicativos** passa a ser a do setup NSIS (com o desinstalador `uninstall.exe`) e o serviço é
+recriado pelos hooks do instalador. As configurações e os contatos continuam.
+
+## 10. Contatos no modo serviço
+
+Com o EveryDesk instalado (modo serviço), a lista de contatos de confiança fica no serviço, que
+roda como SYSTEM. Ela vale **para o computador inteiro**, não para um usuário do Windows:
+
+- um contato com acesso permanente (StayConnected) aceito por um usuário do Windows também
+  consegue entrar enquanto **outro** usuário estiver conectado no computador;
+- qualquer usuário conectado ao Windows pode alterar ou remover os contatos.
+
+Desinstalar **não apaga** a lista guardada pelo serviço (SYSTEM). Para revogar tudo de vez,
+remova os contatos no app **antes** de desinstalar.

@@ -1472,6 +1472,11 @@ fn get_install_info_with_subkey(subkey: String) -> (String, String, String, Stri
 }
 
 pub fn copy_raw_cmd(src_raw: &str, _raw: &str, _path: &str) -> ResultType<String> {
+    // EveryDesk: copy the exe alone, never the (user-writable) folder it was started from;
+    // see `crate::everydesk::install`.
+    #[cfg(feature = "everydesk")]
+    let main_raw = crate::everydesk::install::copy_files_cmd(src_raw, _raw);
+    #[cfg(not(feature = "everydesk"))]
     let main_raw = format!(
         "XCOPY \"{}\" \"{}\" /Y /E /H /C /I /K /R /Z",
         PathBuf::from(src_raw)
@@ -1504,7 +1509,8 @@ pub fn rename_exe_cmd(src_exe: &str, path: &str) -> ResultType<String> {
         .to_string_lossy()
         .to_string();
     let app_name = crate::get_app_name();
-    if src_exe_filename == format!("{app_name}.exe") {
+    // EveryDesk: `copy_raw_cmd` already wrote the exe under its canonical name.
+    if cfg!(feature = "everydesk") || src_exe_filename == format!("{app_name}.exe") {
         Ok("".to_owned())
     } else {
         Ok(format!(
@@ -1682,7 +1688,10 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{start_menu}\\\"
     }
 
     let meta = std::fs::symlink_metadata(&current_exe)?;
+    #[cfg_attr(feature = "everydesk", allow(unused_mut))]
     let mut size = meta.len() / 1024;
+    // EveryDesk installs the exe alone; its folder may be Downloads.
+    #[cfg(not(feature = "everydesk"))]
     if let Some(parent_dir) = current_exe.parent() {
         if let Some(d) = parent_dir.to_str() {
             size = get_directory_size_kb(d);
@@ -2176,6 +2185,27 @@ pub fn bootstrap() -> bool {
     {
         // This function will cause `'sciter.dll' was not found neither in PATH nor near the current executable.` when debugging RustDesk.
         // Only call set_safe_load_dll() on Windows 10 or greater
+        if is_win_10_or_greater() {
+            set_safe_load_dll()
+        } else {
+            true
+        }
+    }
+}
+
+/// EveryDesk: [`bootstrap`]'s DLL-search hardening, callable first thing in `main` (before
+/// branding, logging and config run). The exe may be started (and elevated, "Instalar") from a
+/// user-writable folder such as Downloads; after this, `LoadLibrary` without a full path only
+/// searches System32 (and `AddDllDirectory` dirs), never the exe's folder or the CWD. Static
+/// imports are resolved before `main`; the exe's `/DEPENDENTLOADFLAG` covers those.
+#[cfg(feature = "everydesk")]
+pub fn harden_dll_search() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        true
+    }
+    #[cfg(not(debug_assertions))]
+    {
         if is_win_10_or_greater() {
             set_safe_load_dll()
         } else {

@@ -776,9 +776,12 @@ fn import_config(path: &str) {
     // own config dir; bring the user's `pairings.json` along (best-effort). It is sealed
     // with a key derived from the signing key in the `EveryDesk.toml` copied above.
     // Only on first install (SYSTEM copy missing): `--install-service` also runs on every
-    // update, and the SYSTEM book is the authority (the user copy is just a best-effort
-    // mirror). Overwriting it with a stale mirror would drop pairings the service accepted,
-    // or, with a different sealing key, make the book unreadable (moved to `.bak-<ts>`).
+    // update, and once installed the SYSTEM book is the authority. The user's book is not
+    // kept in sync with it: it is only what this user's app hosts with when it runs the host
+    // in-process (portable, or the fallback while the service is down), so it can be out of
+    // date. Overwriting the SYSTEM book with it would drop pairings the service
+    // accepted, or, with a different sealing key, make the book unreadable (moved to
+    // `.bak-<ts>`).
     #[cfg(feature = "everydesk")]
     if let Some(src) = path.parent().map(|dir| dir.join("pairings.json")) {
         let dst = Config::path("pairings.json");

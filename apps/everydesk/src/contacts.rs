@@ -142,7 +142,7 @@ fn route(service_mode: bool, hosting_in_process: bool) -> Route {
 
 fn current_route() -> Route {
     route(
-        crate::service::is_service_mode(),
+        crate::service::cached_service_mode(),
         librustdesk::common::is_server_running(),
     )
 }
