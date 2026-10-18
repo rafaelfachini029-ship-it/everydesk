@@ -8,15 +8,18 @@ por bloco: copie e cole um de cada vez.
 Quando uma tag que começa com `v` (por exemplo `v0.1.0`) é enviada ao GitHub, o workflow
 `.github/workflows/everydesk-release.yml` começa a rodar:
 
-1. **Espera a sua aprovação.** O job usa o Environment `release`, que tem você como revisor
-   obrigatório. Nada roda (e nenhum segredo é lido) até você clicar em **Approve and deploy**
-   na página do workflow, na aba **Actions**.
-2. **Confere tudo antes de compilar.** Ele confere a tag, os segredos, a versão em
-   `apps/everydesk/tauri.conf.json` e a chave do updater. Se faltar algo, ele para em poucos
-   segundos e mostra uma mensagem em português dizendo o que falta.
-3. **Compila sem segredos.** Depois **monta o instalador** e assina com o certificado da SSL.com
-   (eSigner): o `EveryDesk.exe` de dentro do instalador, o desinstalador, os plugins do
-   instalador e o próprio `EveryDesk_x.y.z_x64-setup.exe`. Toda assinatura leva carimbo de
+1. **Compila, sem segredos** (job `build`, de 1 a 2 horas). Antes de compilar, ele confere a
+   tag, a versão em `apps/everydesk/tauri.conf.json` e a chave do updater. Se algo estiver
+   errado, ele para em poucos segundos e mostra uma mensagem em português. Neste job nenhum
+   segredo existe: nada do que é compilado consegue ler o certificado ou a chave.
+2. **Espera a sua aprovação** (job `sign`). Ele usa o Environment `release`, que tem você como
+   revisor obrigatório. Quando a compilação termina, o GitHub pede a aprovação. Nada é
+   assinado (e nenhum segredo é lido) até você clicar em **Approve and deploy** na página do
+   workflow, na aba **Actions**. O job roda numa máquina nova e limpa. Primeiro ele confere se
+   todos os segredos existem.
+3. **Monta e assina o instalador**, sem compilar nada de novo. Usa o certificado da SSL.com
+   (eSigner) no `EveryDesk.exe` de dentro do instalador, no desinstalador, nos plugins do
+   instalador e no próprio `EveryDesk_x.y.z_x64-setup.exe`. Toda assinatura leva carimbo de
    tempo (RFC 3161), então continua válida depois que o certificado vencer.
 4. **Assina o portátil** `EveryDesk.exe` com o mesmo certificado.
 5. **Confere as assinaturas** com `signtool verify /pa /v`, nos dois arquivos e em cada
@@ -26,7 +29,7 @@ Quando uma tag que começa com `v` (por exemplo `v0.1.0`) é enviada ao GitHub, 
    updater **depois** do Authenticode, para o `.sig` cobrir o arquivo final.
 7. **Gera `latest.json`.** É o arquivo que os EveryDesk instalados consultam. Antes de gravá-lo,
    o workflow confere os dois `.sig` com a chave pública do `tauri.conf.json`.
-8. **Publica a release** no GitHub com `EveryDesk_x.y.z_x64-setup.exe`, `EveryDesk.exe`, os dois
+8. **Publica a release** (job `publish`, o único com permissão de escrita no repositório) no GitHub com `EveryDesk_x.y.z_x64-setup.exe`, `EveryDesk.exe`, os dois
    `.sig`, `latest.json`, `LICENCE` e `SHA256SUMS`.
 
 Tags com sufixo (`v0.1.0-rc1`, `v0.2.0-beta.1`) viram **pré-release**. Tags sem sufixo
@@ -126,7 +129,6 @@ No navegador, abra o repositório
    | Nome | Valor |
    |---|---|
    | `ESIGNER_ENV` | `TEST` no primeiro teste (passo 2). Depois apague a variável, ou use `PROD`. |
-   | `CODESIGNTOOL_SHA256` | o SHA-256 do CodeSignTool (passo 1.4) |
 
 Segredos nunca vão para o repositório nem para arquivos do projeto. Só ficam no Environment
 `release`.
@@ -134,8 +136,10 @@ Segredos nunca vão para o repositório nem para arquivos do projeto. Só ficam 
 ### 1.4 `CODESIGNTOOL_SHA256`
 
 O workflow baixa a ferramenta da SSL.com (CodeSignTool, versão fixa `v1.3.2`) e só a usa se o
-SHA-256 do arquivo bater com esta variável. A SSL.com não publica esse número, então você o
-calcula uma vez no notebook. A partir daí, qualquer troca do arquivo no servidor é recusada.
+SHA-256 do arquivo bater com o valor gravado no próprio workflow. A SSL.com não publica esse
+número, então você o calcula uma vez no notebook. A partir daí, qualquer troca do arquivo no
+servidor é recusada. Enquanto o valor estiver vazio, o job `sign` para antes de baixar qualquer
+coisa.
 
 1. No notebook Windows, baixe
    `https://github.com/SSLcom/CodeSignTool/releases/download/v1.3.2/CodeSignTool-v1.3.2-windows.zip`
@@ -146,7 +150,16 @@ calcula uma vez no notebook. A partir daí, qualquer troca do arquivo no servido
    Get-FileHash "$HOME\Downloads\CodeSignTool-v1.3.2-windows.zip" -Algorithm SHA256
    ```
 
-3. Copie o valor da coluna `Hash` para a variável `CODESIGNTOOL_SHA256` do Environment `release`.
+3. Copie o valor da coluna `Hash`. No GitHub, abra o arquivo
+   `.github/workflows/everydesk-release.yml` e clique no lápis (**Edit this file**). Cole o valor
+   entre as aspas da linha `CODESIGNTOOL_SHA256: ""`. Ela fica assim, com o seu número:
+
+   ```yaml
+   CODESIGNTOOL_SHA256: "0123ABCD...64 caracteres..."
+   ```
+
+   Clique em **Commit changes**. Faça isso **antes** de criar a tag: a tag precisa apontar para
+   um commit que já tenha o valor.
 
 Se um dia trocar a versão (`CODESIGNTOOL_VERSION` no workflow), repita estes passos com o novo
 arquivo.
@@ -172,8 +185,9 @@ o workflow inteiro funciona sem gastar a cota real.
    git push origin v0.1.0-rc1
    ```
 
-5. No GitHub, abra **Actions** → **EveryDesk release** → a execução da tag → **Review
-   deployments** → marque `release` → **Approve and deploy**. A compilação leva de 1 a 2 horas.
+5. No GitHub, abra **Actions** → **EveryDesk release** → a execução da tag. Espere a
+   compilação (job `build`, de 1 a 2 horas). Depois clique em **Review deployments** → marque
+   `release` → **Approve and deploy**. A assinatura e a publicação levam uns 15 minutos.
 6. Quando terminar, abra **Releases**. A `v0.1.0-rc1` aparece como **Pre-release**, com o
    aviso "Versão de TESTE".
 7. No notebook, baixe `EveryDesk_0.1.0-rc1_x64-setup.exe` e `EveryDesk.exe` e confira as
@@ -330,18 +344,48 @@ updater de ponta a ponta antes da `v0.1.0`, quando ainda não há usuários:
 
 Depois que a `v0.1.0` existir, **não faça isso**: os usuários receberiam a versão de teste.
 
+**Nunca marque como "latest" uma rc assinada no sandbox** (as que têm o aviso "Versão de TESTE").
+O updater instalaria um programa com assinatura de teste, que o Windows não reconhece. Use só
+uma rc assinada de verdade (passo 3) para este teste.
+
 ## 8. Se o workflow falhar
 
 | Mensagem | O que fazer |
 |---|---|
-| `Falta o segredo ...` / `Falta a variável CODESIGNTOOL_SHA256` | Crie o item no Environment `release` (passos 1.3 e 1.4). |
+| `Falta o segredo ...` | Crie o segredo no Environment `release` (passo 1.3). |
+| `CODESIGNTOOL_SHA256 está vazio` | Faça o passo 1.4 e crie a tag de novo, num commit que já tenha o valor. |
 | `A tag vX não bate com version ...` | Ajuste `version` no `tauri.conf.json` ou crie a tag certa. |
 | `ESIGNER_ENV=TEST (sandbox) só é permitido ...` | Apague `ESIGNER_ENV` (ou use `PROD`) para tags sem sufixo. |
 | `plugins.updater.pubkey ... ainda é o marcador` | Faça o passo 1.1. |
-| `CodeSignTool ... tem SHA-256 ..., diferente` | O arquivo da SSL.com mudou. Confira de novo (passo 1.4) antes de atualizar a variável. |
+| `CodeSignTool ... tem SHA-256 ..., diferente` | O arquivo da SSL.com mudou. Confira de novo (passo 1.4) antes de trocar o valor. |
 | `CodeSignTool could not sign ...` | Usuário, senha, Credential ID ou código OTP errados, ou cota do eSigner esgotada. A mensagem da SSL.com aparece logo acima no log. |
 | `... .sig does not verify with the updater public key` | `TAURI_SIGNING_PRIVATE_KEY` não é o par da chave pública colada no `tauri.conf.json`. |
 | `signtool verify /pa falhou` | A assinatura não é confiável no Windows. Confira se não ficou `ESIGNER_ENV=TEST`. |
 
-Para tentar de novo com a mesma tag, apague a release (se ela chegou a ser criada) e use
-**Re-run all jobs** na execução do workflow.
+Para tentar de novo com a mesma tag, use **Re-run failed jobs** na execução do workflow, e
+não **Re-run all jobs**. Cada vez que o job `sign` roda, ele gasta 9 assinaturas da cota do
+eSigner. Se só o `publish` falhou, só ele roda de novo, sem assinar nada. Se a release chegou a
+ser criada, apague-a antes.
+
+Se você mudou um arquivo do repositório (por exemplo o passo 1.4), o re-run não vê a mudança,
+porque ele usa o mesmo commit da tag. Nesse caso, apague a tag e crie-a de novo no commit novo:
+
+```sh
+git push --delete origin v0.1.0-rc1
+```
+
+```sh
+git tag -d v0.1.0-rc1
+```
+
+```sh
+git pull
+```
+
+```sh
+git tag v0.1.0-rc1
+```
+
+```sh
+git push origin v0.1.0-rc1
+```
