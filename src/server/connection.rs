@@ -251,6 +251,78 @@ fn file_action_allowed(conn_type_is_ft: bool, authorized: bool, ft_enabled: bool
     conn_type_is_ft || (authorized && ft_enabled)
 }
 
+/// EveryDesk: the live connections of this process by remote peer id, so the process that owns
+/// the trust book can end a revoked pairing's sessions itself (`ipc::Data::BookRemove`), not
+/// only through the CM clients, which miss a connection with no CM bridge yet (e.g. a
+/// stay-connected login before any user logged on). Each connection gets the existing
+/// `Data::Revoke` on its CM channel, so it sends the revoke notice and closes as before.
+#[cfg(feature = "everydesk")]
+pub mod ed_revoke {
+    use super::*;
+
+    lazy_static::lazy_static! {
+        static ref CONNS: Mutex<HashMap<i32, (String, mpsc::UnboundedSender<ipc::Data>)>> =
+            Default::default();
+    }
+
+    /// Unregisters on drop.
+    pub(super) struct Registration(i32);
+
+    impl Registration {
+        pub(super) fn new(conn_id: i32, tx: mpsc::UnboundedSender<ipc::Data>) -> Self {
+            CONNS.lock().unwrap().insert(conn_id, (String::new(), tx));
+            Self(conn_id)
+        }
+
+        /// Called whenever the login request (and so the remote id) is known or changes.
+        pub(super) fn set_peer(&self, peer_id: &str) {
+            if let Some(e) = CONNS.lock().unwrap().get_mut(&self.0) {
+                e.0 = peer_id.to_owned();
+            }
+        }
+    }
+
+    impl Drop for Registration {
+        fn drop(&mut self) {
+            CONNS.lock().unwrap().remove(&self.0);
+        }
+    }
+
+    /// Pure: the connections to end for `peer_id`. An empty id (login not seen yet) never matches.
+    pub(super) fn targets<'a>(
+        conns: impl IntoIterator<Item = (i32, &'a str)>,
+        peer_id: &str,
+    ) -> Vec<i32> {
+        if peer_id.is_empty() {
+            return Vec::new();
+        }
+        let mut v: Vec<i32> = conns
+            .into_iter()
+            .filter(|(_, p)| *p == peer_id)
+            .map(|(id, _)| id)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Ends every live connection of `peer_id` in this process; returns how many were told.
+    pub fn end_sessions(peer_id: &str) -> usize {
+        let conns = CONNS.lock().unwrap();
+        let ids = targets(conns.iter().map(|(id, (p, _))| (*id, p.as_str())), peer_id);
+        for id in &ids {
+            if let Some((_, tx)) = conns.get(id) {
+                allow_err!(tx.send(ipc::Data::Revoke {
+                    peer_id: peer_id.to_owned(),
+                }));
+            }
+        }
+        if !ids.is_empty() {
+            log::info!("pairings: ending {} session(s) of revoked {}", ids.len(), peer_id);
+        }
+        ids.len()
+    }
+}
+
 /// EveryDesk screen-session file scope (Stage 4: upload only). A screen session (`DEFAULT_CONN`)
 /// may only drop files into the host's home, `home/Desktop` or `home/Downloads`, list exactly
 /// those three folders (the controller's destination probes), cancel, and answer an overwrite
@@ -734,6 +806,9 @@ pub struct Connection {
     // EveryDesk: the controller last sent `enable_file_transfer = No` (its view-only).
     #[cfg(feature = "everydesk")]
     ed_file_transfer_off: bool,
+    // EveryDesk: this connection in `ed_revoke`, so a BookRemove can end it.
+    #[cfg(feature = "everydesk")]
+    ed_revoke_reg: ed_revoke::Registration,
     peer_argb: u32,
     session_last_recv_time: Option<Arc<Mutex<Instant>>>,
     chat_unanswered: bool,
@@ -869,6 +944,8 @@ impl Connection {
         let (tx_from_cm_holder, mut rx_from_cm) = mpsc::unbounded_channel::<ipc::Data>();
         // holding tx_from_cm_holder to avoid cpu burning of rx_from_cm.recv when all sender closed
         let tx_from_cm = tx_from_cm_holder.clone();
+        #[cfg(feature = "everydesk")]
+        let ed_revoke_reg = ed_revoke::Registration::new(id, tx_from_cm_holder.clone());
         let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
@@ -953,6 +1030,8 @@ impl Connection {
             ed_upload_ids: HashSet::new(),
             #[cfg(feature = "everydesk")]
             ed_file_transfer_off: false,
+            #[cfg(feature = "everydesk")]
+            ed_revoke_reg,
             peer_argb: 0u32,
             session_last_recv_time: None,
             chat_unanswered: false,
@@ -3210,6 +3289,8 @@ impl Connection {
 
     async fn handle_login_request_without_validation(&mut self, lr: &LoginRequest) {
         self.lr = lr.clone();
+        #[cfg(feature = "everydesk")]
+        self.ed_revoke_reg.set_peer(&lr.my_id);
         self.peer_argb = crate::str2color(&format!("{}{}", &lr.my_id, &lr.my_platform), 0xff);
         if let Some(o) = lr.option.as_ref() {
             self.options_in_login = Some(o.clone());
@@ -8262,6 +8343,40 @@ mod test {
         assert_eq!(ids, vec![1, 2, 3]);
         assert!(uploads.is_empty());
         assert!(super::ed_files::revoke_ids(&mut uploads, vec![]).is_empty());
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn everydesk_revoke_targets_by_peer_id() {
+        use super::ed_revoke::targets;
+        let conns = [(7, "abc"), (3, "abc"), (5, "abcd"), (9, ""), (4, "ABC")];
+        assert_eq!(targets(conns, "abc"), vec![3, 7]);
+        assert_eq!(targets(conns, "abcd"), vec![5]);
+        assert!(targets(conns, "zzz").is_empty());
+        // a connection whose login was not seen yet never matches, not even an empty id
+        assert!(targets(conns, "").is_empty());
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn everydesk_revoke_ends_registered_sessions() {
+        use super::ed_revoke::{end_sessions, Registration};
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<ipc::Data>();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<ipc::Data>();
+        let a = Registration::new(-91001, tx_a);
+        let b = Registration::new(-91002, tx_b);
+        a.set_peer("ed-revoke-test-a");
+        b.set_peer("ed-revoke-test-b");
+        assert_eq!(end_sessions("ed-revoke-test-a"), 1);
+        match rx_a.try_recv() {
+            Ok(ipc::Data::Revoke { peer_id }) => assert_eq!(peer_id, "ed-revoke-test-a"),
+            _ => panic!("expected Revoke"),
+        }
+        assert!(rx_b.try_recv().is_err());
+        drop(a);
+        assert_eq!(end_sessions("ed-revoke-test-a"), 0);
+        drop(b);
+        assert_eq!(end_sessions("ed-revoke-test-b"), 0);
     }
 
     #[cfg(feature = "everydesk")]

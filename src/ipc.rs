@@ -1100,7 +1100,29 @@ async fn handle(data: Data, stream: &mut Connection) {
         },
         #[cfg(feature = "everydesk")]
         req @ (Data::BookList | Data::BookSetPolicy { .. } | Data::BookRemove { .. }) => {
-            let reply = everydesk_book::serve(req, crate::everydesk::pairings::book());
+            let removed = match &req {
+                Data::BookRemove { peer_id } => Some(peer_id.clone()),
+                _ => None,
+            };
+            // The book's lock and its save are blocking: keep them off the async workers.
+            let reply = match tokio::task::spawn_blocking(move || {
+                everydesk_book::serve(req, crate::everydesk::pairings::book())
+            })
+            .await
+            {
+                Ok(reply) => reply,
+                Err(e) => {
+                    log::error!("pairings: ipc book task failed: {e}");
+                    Data::BookReply(Err("erro interno".to_owned()))
+                }
+            };
+            // A removed pairing ends its live sessions here too, not only through the CM
+            // clients (a connection with no CM bridge yet, e.g. a stay-connected login before
+            // any user logged on, would be missed). Duplicates with the CM path are harmless.
+            #[cfg(not(target_os = "ios"))]
+            if let (Some(peer_id), Data::BookReply(Ok(_))) = (removed, &reply) {
+                crate::server::ed_revoke::end_sessions(&peer_id);
+            }
             allow_err!(stream.send(&reply).await);
         }
         Data::Options(value) => match value {
