@@ -7,6 +7,11 @@
 //! `ipc::set_options` sends) and reads come from `ui_interface::get_option`, the cache that
 //! `ui_interface::start_option_status_sync` refreshes from the host every second.
 //!
+//! The route uses the service watcher's cached mode (`service::cached_service_mode`), not a
+//! service-manager query per call. While this process still hosts in-process (the hand-over
+//! window: the service runs but we have not exited yet) we own the `""` pipe, so IPC would only
+//! reach ourselves: that case routes Local.
+//!
 //! Engine modes (`--server`, `--service`, ...) run `lib.rs::main`'s startup fixes on their own
 //! config with plain `Config` writes; only the app window routes through here.
 
@@ -18,7 +23,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
-    /// Over IPC to the service's `--server` (plus a local copy).
+    /// Over IPC to the service's `--server` only (`start_server(false, true)` copies the
+    /// service's config over this user's at every launch, so a local copy would be lost anyway).
     Ipc,
     /// This process's own `Config`.
     Local,
@@ -33,8 +39,14 @@ pub fn route(service_mode: bool) -> Route {
     }
 }
 
+/// `route` for the host-side options. `hosting_in_process`: this process still owns the `""`
+/// pipe (hand-over window), so the IPC peer would be ourselves.
+pub fn host_route(service_mode: bool, hosting_in_process: bool) -> Route {
+    route(service_mode && !hosting_in_process)
+}
+
 fn current_route() -> Route {
-    route(crate::service::is_service_mode())
+    host_route(crate::service::cached_service_mode(), crate::service::hosting_in_process())
 }
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(3);
@@ -65,23 +77,29 @@ pub fn apply(map: &mut HashMap<String, String>, key: &str, value: &str) {
     }
 }
 
+/// The edit step of the read-modify-write: `pairs` applied to the host's whole map, every other
+/// key kept. `None` when nothing changes (no write needed).
+pub fn edited(map: &HashMap<String, String>, pairs: &[(String, String)]) -> Option<HashMap<String, String>> {
+    let mut out = map.clone();
+    for (k, v) in pairs {
+        apply(&mut out, k, v);
+    }
+    (out != *map).then_some(out)
+}
+
 /// Read-modify-write of the host's map on one connection. Unlike `ipc::set_option` it fails
 /// instead of falling back to this user's map (so the user's whole map is never pushed onto the
 /// service) and it reports whether the host acknowledged.
 async fn ipc_set(pairs: Vec<(String, String)>) -> hbb_common::ResultType<()> {
     let mut c = ipc::connect(1000, "").await?;
     c.send(&Data::Options(None)).await?;
-    let mut map = match c.next_timeout(1000).await? {
+    let current = match c.next_timeout(1000).await? {
         Some(Data::Options(Some(m))) => m,
         _ => hbb_common::bail!("resposta inesperada do serviço"),
     };
-    let before = map.clone();
-    for (k, v) in &pairs {
-        apply(&mut map, k, v);
-    }
-    if map == before {
+    let Some(map) = edited(&current, &pairs) else {
         return Ok(());
-    }
+    };
     c.send(&Data::Options(Some(map))).await?;
     match c.next_timeout(1000).await? {
         Some(Data::Options(None)) => Ok(()),
@@ -109,15 +127,18 @@ fn ipc_set_blocking(pairs: Vec<(String, String)>) -> Result<(), String> {
 }
 
 const SERVICE_UNREACHABLE: &str =
-    "O serviço do EveryDesk não respondeu; a mudança ficou salva só neste usuário e vale quando o serviço voltar a ler a configuração. Tente de novo.";
+    "O serviço do EveryDesk não respondeu. A alteração não foi aplicada; tente de novo.";
 
-/// Writes a host-side option where the host reads it. Service mode: over IPC (and locally,
-/// so an in-process fallback host sees the same value); on IPC failure the local write still
-/// happens and the error says so.
+/// Writes a host-side option where the host reads it. Portable: this process's `Config`.
+/// Service mode: over IPC only, nothing local (the service's config replaces this user's at
+/// the next launch); on IPC failure nothing changed and the error says so. Blocks up to
+/// `IPC_TIMEOUT`: call it off the UI thread.
 pub fn set_option(key: &str, value: &str) -> Result<(), String> {
-    Config::set_option(key.to_owned(), value.to_owned());
     match current_route() {
-        Route::Local => Ok(()),
+        Route::Local => {
+            Config::set_option(key.to_owned(), value.to_owned());
+            Ok(())
+        }
         Route::Ipc => match ipc_set_blocking(vec![(key.to_owned(), value.to_owned())]) {
             Ok(()) => {
                 remember(key, value);
@@ -187,6 +208,11 @@ mod tests {
     fn permission_writes_route_to_ipc_in_service_mode() {
         assert_eq!(route(true), Route::Ipc);
         assert_eq!(route(false), Route::Local);
+        assert_eq!(host_route(true, false), Route::Ipc);
+        assert_eq!(host_route(false, false), Route::Local);
+        assert_eq!(host_route(false, true), Route::Local);
+        // Hand-over window: we still own the `""` pipe, IPC would reach ourselves.
+        assert_eq!(host_route(true, true), Route::Local);
         if !cfg!(windows) {
             // Off Windows there is no service mode: everything stays local.
             assert_eq!(current_route(), Route::Local);
@@ -201,6 +227,40 @@ mod tests {
         // On is stored as "" = key removed (`cm::option_value(true)`).
         apply(&mut m, "enable-audio", "");
         assert!(!m.contains_key("enable-audio"));
+    }
+
+    #[test]
+    fn edit_keeps_every_other_service_key() {
+        let svc: HashMap<String, String> = [
+            ("stop-service", "Y"),
+            ("everydesk-auto-elevate", "Y"),
+            ("approve-mode", "click"),
+            ("custom-rendezvous-server", "rs.example"),
+            ("enable-audio", "N"),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+        let one = |k: &str, v: &str| vec![(k.to_owned(), v.to_owned())];
+
+        let m = edited(&svc, &one("enable-clipboard", "N")).expect("changed");
+        assert_eq!(m.len(), svc.len() + 1);
+        for (k, v) in &svc {
+            assert_eq!(m.get(k), Some(v), "{k} kept");
+        }
+        assert_eq!(m.get("enable-clipboard").map(String::as_str), Some("N"));
+
+        // "" removes only that key.
+        let m = edited(&svc, &one("enable-audio", "")).expect("changed");
+        assert!(!m.contains_key("enable-audio"));
+        assert_eq!(m.len(), svc.len() - 1);
+        for (k, v) in svc.iter().filter(|(k, _)| *k != "enable-audio") {
+            assert_eq!(m.get(k), Some(v), "{k} kept");
+        }
+
+        // No change, no write.
+        assert_eq!(edited(&svc, &one("approve-mode", "click")), None);
+        assert_eq!(edited(&svc, &one("enable-file-transfer", "")), None);
     }
 
     #[test]

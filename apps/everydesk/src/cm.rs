@@ -810,27 +810,36 @@ pub fn cm_pair_ack(
     Ok(())
 }
 
+/// Settings may go over IPC to the service (up to 3 s): never on the main thread. Tauri runs
+/// `async` commands off it; the blocking part goes to the blocking pool.
+async fn off_main<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())
+}
+
 /// "Permitir sempre" (`remember`) / "Só desta vez" on the elevation card: Windows shows its
 /// UAC prompt on this machine; `cm:elevation done` follows once the helper runs.
 #[tauri::command]
-pub fn cm_elevate(conn_id: i32, remember: bool) {
+pub async fn cm_elevate(conn_id: i32, remember: bool) {
     log::info!("everydesk: elevate #{conn_id} (remember={remember})");
+    with_state(|s| s.elevation.answered());
+    ui_cm_interface::elevate_portable(conn_id);
+    // Remembered after the prompt is up: a slow service must not delay the UAC prompt.
     if remember {
-        if let Err(e) = crate::settings::set_option(AUTO_ELEVATE_OPTION, "Y") {
+        let r = off_main(|| crate::settings::set_option(AUTO_ELEVATE_OPTION, "Y")).await;
+        if let Err(e) = r.and_then(|r| r) {
             log::warn!("everydesk: remember elevation: {e}");
         }
     }
-    with_state(|s| s.elevation.answered());
-    ui_cm_interface::elevate_portable(conn_id);
 }
 
 /// "Agora não" (this episode only) / "não perguntar mais" (`remember_no`: never ask until
 /// changed in the settings).
 #[tauri::command]
-pub fn cm_elevation_dismiss(remember_no: bool) {
+pub async fn cm_elevation_dismiss(remember_no: bool) {
     log::info!("everydesk: elevation dismissed (remember_no={remember_no})");
     if remember_no {
-        if let Err(e) = crate::settings::set_option(AUTO_ELEVATE_OPTION, "N") {
+        let r = off_main(|| crate::settings::set_option(AUTO_ELEVATE_OPTION, "N")).await;
+        if let Err(e) = r.and_then(|r| r) {
             log::warn!("everydesk: remember no elevation: {e}");
         }
     }
@@ -839,17 +848,17 @@ pub fn cm_elevation_dismiss(remember_no: bool) {
 
 /// The remembered answer: "Y" (elevate without asking), "N" (never ask) or "" (ask).
 #[tauri::command]
-pub fn cm_elevation_setting() -> String {
+pub async fn cm_elevation_setting() -> String {
     normalize_setting(&crate::settings::get_option(AUTO_ELEVATE_OPTION)).to_owned()
 }
 
 /// Changes the remembered answer (for the settings toggle); "" goes back to asking.
 #[tauri::command]
-pub fn cm_elevation_set_setting(value: String) -> Result<(), String> {
+pub async fn cm_elevation_set_setting(value: String) -> Result<(), String> {
     if normalize_setting(&value) != value {
         return Err(format!("invalid elevation setting {value:?}"));
     }
-    crate::settings::set_option(AUTO_ELEVATE_OPTION, &value)
+    off_main(move || crate::settings::set_option(AUTO_ELEVATE_OPTION, &value)).await?
 }
 
 /// The connection whose elevation card is up and unanswered, for the UI to hydrate on mount.
@@ -942,24 +951,23 @@ pub fn permissions_from(get: impl Fn(&str) -> String) -> Permissions {
 /// The four host switches: "Receber arquivos", "Compartilhar o som", "Permitir gravar",
 /// "Área de transferência".
 #[tauri::command]
-pub fn cm_get_permissions() -> Permissions {
+pub async fn cm_get_permissions() -> Permissions {
     permissions_from(crate::settings::get_option)
 }
 
-/// Flips one host switch: stored for the next sessions and applied to every session on now
-/// (the engine stops a running file job when `file` goes off).
+/// Flips one host switch: stored for the next sessions and, once stored, applied to every
+/// session on now (the engine stops a running file job when `file` goes off). If the service
+/// did not take it, nothing changes (the UI reverts the toggle and shows the error).
 #[tauri::command]
-pub fn cm_set_permission(name: String, on: bool) -> Result<(), String> {
+pub async fn cm_set_permission(name: String, on: bool) -> Result<(), String> {
     let opt = permission_option(&name).ok_or_else(|| format!("Permissão desconhecida: {name}"))?;
     log::info!("everydesk: permission {name} -> {on}");
-    // Stored where the host reads it; on IPC failure the live sessions still switch and the
-    // error tells the UI the setting did not reach the service.
-    let stored = crate::settings::set_option(opt, option_value(on));
+    off_main(move || crate::settings::set_option(opt, option_value(on))).await??;
     let live: Vec<i32> = with_state(|s| s.connected.keys().copied().collect());
     for id in live {
         ui_cm_interface::switch_permission(id, name.clone(), on);
     }
-    stored
+    Ok(())
 }
 
 #[cfg(test)]
@@ -994,7 +1002,7 @@ mod tests {
             p,
             Permissions { file: true, audio: false, recording: true, clipboard: true }
         );
-        assert!(cm_set_permission("keyboard".into(), false).is_err());
+        assert!(tauri::async_runtime::block_on(cm_set_permission("keyboard".into(), false)).is_err());
     }
 
     #[test]

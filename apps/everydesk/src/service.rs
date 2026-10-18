@@ -115,8 +115,18 @@ pub fn is_service_mode() -> bool {
     status().mode == Mode::Installed
 }
 
-fn hosting_in_process() -> bool {
+/// This process runs the in-process host (and so owns the `""` IPC pipe).
+pub fn hosting_in_process() -> bool {
     librustdesk::common::is_server_running()
+}
+
+/// `is_service_mode` as of the watcher's last poll (every 1-5 s, `start_watcher`), so callers on
+/// hot paths do not query the service manager; a direct query only before the first poll.
+pub fn cached_service_mode() -> bool {
+    if let Some(st) = *LAST.lock().unwrap() {
+        return st.mode == Mode::Installed;
+    }
+    is_service_mode()
 }
 
 static LAST: Mutex<Option<ServiceStatus>> = Mutex::new(None);
