@@ -775,6 +775,10 @@ fn import_config(path: &str) {
     // EveryDesk: the host (the service's `--server`) reads the owner's trust book from its
     // own config dir; bring the user's `pairings.json` along (best-effort). It is sealed
     // with a key derived from the signing key in the `EveryDesk.toml` copied above.
+    // Only on first install (SYSTEM copy missing): `--install-service` also runs on every
+    // update, and the SYSTEM book is the authority (the user copy is just a best-effort
+    // mirror). Overwriting it with a stale mirror would drop pairings the service accepted,
+    // or, with a different sealing key, make the book unreadable (moved to `.bak-<ts>`).
     #[cfg(feature = "everydesk")]
     if let Some(src) = path.parent().map(|dir| dir.join("pairings.json")) {
         let dst = Config::path("pairings.json");
@@ -785,21 +789,18 @@ fn import_config(path: &str) {
             }
         } else {
             log::info!(
-                "pairings not imported from {:?} (missing or not newer)",
+                "pairings not imported from {:?} (source missing or destination exists)",
                 src
             );
         }
     }
 }
 
-/// `src` exists, is not `dst` itself, and is newer than `dst` (or `dst` is missing).
+/// `src` exists, is not `dst` itself, and `dst` does not exist yet (first install only;
+/// an existing destination is authoritative and is never overwritten).
 #[cfg(feature = "everydesk")]
 fn should_import_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
-    use hbb_common::get_modified_time;
-    if !src.is_file() || src == dst {
-        return false;
-    }
-    !dst.exists() || get_modified_time(src) > get_modified_time(dst)
+    src.is_file() && src != dst && !dst.exists()
 }
 
 /// invoke a new connection
@@ -959,7 +960,7 @@ mod tests {
 
     #[cfg(feature = "everydesk")]
     #[test]
-    fn should_import_file_only_when_source_is_newer() {
+    fn should_import_file_only_when_destination_is_missing() {
         let dir = std::env::temp_dir().join(format!(
             "everydesk-import-{}-{}",
             std::process::id(),
@@ -983,6 +984,21 @@ mod tests {
             .open(&src)
             .unwrap()
             .set_modified(old)
+            .unwrap();
+        assert!(!should_import_file(&src, &dst));
+        // Destination exists and is older than the source: still keep it (authority).
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        std::fs::File::options()
+            .write(true)
+            .open(&dst)
+            .unwrap()
+            .set_modified(older)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
             .unwrap();
         assert!(!should_import_file(&src, &dst));
         std::fs::remove_dir_all(&dir).ok();
