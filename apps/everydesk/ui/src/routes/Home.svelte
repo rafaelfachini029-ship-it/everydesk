@@ -13,6 +13,7 @@
   import ContactCards from '../lib/home/ContactCards.svelte'
   import GoField from '../lib/home/GoField.svelte'
   import SettingsPanel from '../lib/home/SettingsPanel.svelte'
+  import UpdateCard from '../lib/home/UpdateCard.svelte'
   import { ContactBook } from '../lib/home/contacts.svelte.ts'
   import { goWidthCss } from '../lib/home/bigcode.ts'
   import { suggest } from '../lib/home/go.ts'
@@ -108,6 +109,7 @@
 
 <main class="home" onwheel={wheel}>
   <SettingsPanel />
+  <UpdateCard />
   <div class="stage">
     <BigCode code={myId} {status} />
     <!-- svelte-ignore a11y_no_static_element_interactions (Escape bubbling from the field/cards) -->

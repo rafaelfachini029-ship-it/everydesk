@@ -7,6 +7,7 @@ mod server;
 mod service;
 mod settings;
 mod session;
+mod update;
 pub mod memorable;
 
 use hbb_common::config::Config;
@@ -193,6 +194,7 @@ fn run(hidden: bool) {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // The only source of paths `session_send_files` accepts: what the OS handed the window.
         .on_window_event(|_w, e| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = e {
@@ -232,6 +234,7 @@ fn run(hidden: bool) {
             // The service's config is the host's: pin server/key/click approval there too.
             server::ensure_host_config_on_service();
             service::start_watcher(app.handle().clone());
+            update::start(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -241,6 +244,7 @@ fn run(hidden: bool) {
             service::service_status,
             service::install_permanent,
             service::uninstall_permanent,
+            update::update_status, update::update_install, update::update_dismiss, update::about_info, update::about_open,
             commands::session_connect,
             commands::session_close,
             commands::session_login,

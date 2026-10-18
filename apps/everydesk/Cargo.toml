@@ -28,6 +28,17 @@ scrap = { path = "../../libs/scrap" }
 base = { path = "../../libs/base" }
 tauri-plugin-dialog = "2.8.3"
 tauri-plugin-opener = "2"
+# Auto-update (update.rs): installed builds run the signed NSIS setup; portable builds swap
+# their own exe after the same minisign check (`minisign-verify`, also the plugin's verifier).
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "zip"] }
+minisign-verify = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+self-replace = "1.5"
+
+[dev-dependencies]
+# Tests only: sign a fake package to exercise the accept/refuse paths of update.rs.
+minisign = "0.9"
 
 [features]
 hwcodec = ["rustdesk/hwcodec"]

@@ -13,6 +13,8 @@
 !define EVERYDESK_RUN_VALUE "EveryDesk"
 
 ; Antes de copiar os arquivos: tira o serviço do caminho para o exe não ficar travado.
+; Também roda na atualização automática (o app executa o setup com /P /UPDATE /R): em /UPDATE o
+; Tauri não chama o desinstalador antigo, então este PREINSTALL e o POSTINSTALL abaixo bastam.
 !macro NSIS_HOOK_PREINSTALL
   ; Consulta se o serviço EveryDesk já existe (código 0 = existe; 1060 = não existe).
   nsExec::ExecToStack 'sc query "${EVERYDESK_SERVICE}"'

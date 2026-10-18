@@ -64,6 +64,19 @@
     "macOS": {
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist"
+    },
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "COLE_AQUI_A_CHAVE_PUBLICA_DO_UPDATER",
+      "endpoints": [
+        "https://github.com/rafaelfachini029-ship-it/everydesk/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

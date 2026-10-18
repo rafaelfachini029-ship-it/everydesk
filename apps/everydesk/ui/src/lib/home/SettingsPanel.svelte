@@ -3,7 +3,9 @@
   someone who accesses this machine may do (four plain switches: files, sound, recording,
   clipboard; `cm_get_permissions` / `cm_set_permission`, which also applies to whoever is
   connected now), and permanent access (`service_status`, kept current by `service:status`;
-  `install_permanent` / `uninstall_permanent`, one UAC prompt; Windows only). A disclosure: the gear says whether
+  `install_permanent` / `uninstall_permanent`, one UAC prompt; Windows only), and "Sobre"
+  (version, commit, source code and AGPL-3.0 links; `about_info` / `about_open`, fixed URLs
+  chosen in Rust). A disclosure: the gear says whether
   it is open (aria-expanded/aria-controls); Escape or "Fechar" closes it and puts the focus
   back on the gear.
 -->
@@ -17,6 +19,28 @@
   import { applyTheme, storedTheme, type Theme } from './theme.ts'
   import { listen } from '@tauri-apps/api/event'
   import { SERVICE_EVENT, serviceError, serviceView, type ServiceStatus } from './service.ts'
+  import { aboutLine, type About } from './update.ts'
+
+  let about = $state<About | null>(null)
+  let aboutError = $state('')
+
+  async function loadAbout() {
+    if (about) return
+    try {
+      about = await invoke<About>('about_info')
+    } catch (e) {
+      console.warn('everydesk: about_info', e)
+    }
+  }
+
+  async function openLink(which: 'source' | 'license') {
+    aboutError = ''
+    try {
+      await invoke('about_open', { which })
+    } catch (e) {
+      aboutError = typeof e === 'string' ? e : 'Não consegui abrir o navegador.'
+    }
+  }
 
   let service = $state<ServiceStatus | null>(null)
   let serviceBusy = $state(false)
@@ -80,6 +104,7 @@
     if (open) {
       loadPerms()
       loadService()
+      loadAbout()
     }
   })
 
@@ -159,6 +184,21 @@
         {/if}
         {#if view.hint}<p id="service-hint" class="perms-hint">{view.hint}</p>{/if}
         {#if serviceMsg}<p class="service-msg" role="status">{serviceMsg}</p>{/if}
+      </div>
+      <div class="opt about" role="group" aria-labelledby="about-label">
+        <span id="about-label">Sobre</span>
+        {#if about}
+          <p class="about-line">{aboutLine(about)}</p>
+          <p class="perms-hint">
+            Software livre sob a licença {about.license}, baseado no RustDesk. Você pode ler, mudar e
+            redistribuir o código.
+          </p>
+          <div class="links">
+            <button class="link" onclick={() => openLink('source')}>Código-fonte</button>
+            <button class="link" onclick={() => openLink('license')}>Licença {about.license}</button>
+          </div>
+        {/if}
+        {#if aboutError}<p class="perms-error" role="alert">{aboutError}</p>{/if}
       </div>
     </div>
   {/if}
@@ -269,6 +309,37 @@
     margin: 0;
     font-size: var(--fs-label);
     color: var(--text);
+  }
+  .about-line {
+    margin: 0;
+    font-family: var(--font-code);
+    font-size: var(--fs-label);
+    color: var(--text);
+  }
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+  .link {
+    padding: var(--space-1) 0;
+    border: 0;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: var(--fs-label);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+  .link:hover {
+    text-decoration-color: var(--text);
+  }
+  .link:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
   .switch {
     display: grid;
