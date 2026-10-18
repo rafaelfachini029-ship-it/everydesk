@@ -456,6 +456,24 @@ pub enum Data {
     /// recording this session (`Misc::client_record_status`), so the host UI can show it.
     #[cfg(feature = "everydesk")]
     RecordStatus { conn_id: i32, recording: bool },
+    /// EveryDesk, app -> host (main `""` pipe): list this machine's trust book. In service mode
+    /// the book lives in the SYSTEM `--server` (its own `pairings.json`), not in the app.
+    /// The pipe only lists, changes the policy of an EXISTING pairing, or removes one: nothing
+    /// over IPC adds a pairing (that needs a verified login accepted on the card).
+    #[cfg(feature = "everydesk")]
+    BookList,
+    /// EveryDesk, app -> host: set the policy of an existing pairing (validated host-side).
+    #[cfg(feature = "everydesk")]
+    BookSetPolicy {
+        peer_id: String,
+        policy: crate::everydesk::pairings::Policy,
+    },
+    /// EveryDesk, app -> host: forget a pairing (idempotent).
+    #[cfg(feature = "everydesk")]
+    BookRemove { peer_id: String },
+    /// EveryDesk, host -> app: the book after the request, or a pt-BR error.
+    #[cfg(feature = "everydesk")]
+    BookReply(Result<Vec<crate::everydesk::pairings::BookEntry>, String>),
     // CM-side file reading responses (Windows only)
     // These are sent from CM back to Connection when CM handles file reading
     /// Response to ReadFile: contains initial file list or error
@@ -1080,6 +1098,11 @@ async fn handle(data: Data, stream: &mut Connection) {
                 }
             }
         },
+        #[cfg(feature = "everydesk")]
+        req @ (Data::BookList | Data::BookSetPolicy { .. } | Data::BookRemove { .. }) => {
+            let reply = everydesk_book::serve(req, crate::everydesk::pairings::book());
+            allow_err!(stream.send(&reply).await);
+        }
         Data::Options(value) => match value {
             None => {
                 let v = Config::get_options();
@@ -2314,6 +2337,94 @@ pub async fn set_install_option(k: String, v: String) -> ResultType<()> {
     Ok(())
 }
 
+/// EveryDesk: the host's trust book over the main pipe (`Data::Book*`). Served by whichever
+/// process hosts the `""` pipe: the SYSTEM `--server` in service mode, the app when portable.
+///
+/// Trust: on Windows the main pipe only accepts the logged-in session running the SAME
+/// executable (`ipc_auth`), the same gate that already lets the app change approve-mode and the
+/// password. Raising a policy (AskAlways -> StayConnected) over it is therefore no more than the
+/// host owner can do in the app UI; adding a pairing is not offered at all.
+#[cfg(feature = "everydesk")]
+pub mod everydesk_book {
+    use super::*;
+    use crate::everydesk::pairings::{check_peer_id, Book, BookEntry};
+    use std::sync::Mutex;
+
+    /// Host side: applies one request to `book`, persists a change, and returns the reply.
+    pub fn serve(req: Data, book: &Mutex<Book>) -> Data {
+        let mut book = book.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = match req {
+            Data::BookList => Ok(false),
+            Data::BookSetPolicy { peer_id, policy } => {
+                let r = book.set_policy(&peer_id, policy);
+                if let Ok(true) = r {
+                    log::info!("pairings: policy of {peer_id} -> {policy:?} (ipc)");
+                }
+                r
+            }
+            Data::BookRemove { peer_id } => check_peer_id(&peer_id).map(|()| {
+                let had = book.get(&peer_id).is_some();
+                book.remove(&peer_id);
+                if had {
+                    log::info!("pairings: {peer_id} revoked (ipc)");
+                }
+                had
+            }),
+            _ => Err("pedido inválido".to_owned()),
+        };
+        let res = changed.and_then(|changed| {
+            if changed {
+                book.save().map_err(|e| {
+                    log::error!("pairings: cannot save after an ipc change: {e}");
+                    format!("não foi possível salvar: {e}")
+                })?;
+            }
+            Ok(book.entries())
+        });
+        Data::BookReply(res)
+    }
+
+    pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    pub const UNREACHABLE: &str = "O serviço do EveryDesk não respondeu. Tente de novo.";
+
+    async fn call(req: Data) -> ResultType<Result<Vec<BookEntry>, String>> {
+        let mut c = connect(1000, "").await?;
+        c.send(&req).await?;
+        match c.next_timeout(2000).await? {
+            Some(Data::BookReply(r)) => Ok(r),
+            _ => hbb_common::bail!("unexpected reply"),
+        }
+    }
+
+    /// App side, blocking: sends `req` to the host on its own thread and runtime (callers may
+    /// sit inside a tokio runtime) and gives up after `TIMEOUT`. `Err` is pt-BR, for the UI.
+    pub fn request(req: Data) -> Result<Vec<BookEntry>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("everydesk-book".into())
+            .spawn(move || {
+                let res = hbb_common::tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.into())
+                    .and_then(|rt| rt.block_on(call(req)));
+                let _ = tx.send(res);
+            })
+            .map_err(|e| e.to_string())?;
+        match rx.recv_timeout(TIMEOUT) {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(e)) => {
+                log::warn!("pairings: ipc request failed: {e}");
+                Err(UNREACHABLE.to_owned())
+            }
+            Err(_) => {
+                log::warn!("pairings: ipc request timed out");
+                Err(UNREACHABLE.to_owned())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -2497,5 +2608,135 @@ mod test {
             Data::DrmFrame { cursor_pos, .. } => assert_eq!(cursor_pos, Some((3, 4))),
             other => panic!("expected DrmFrame, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn everydesk_book_data_roundtrip() {
+        use crate::everydesk::pairings::{BookEntry, Policy};
+        let entry = BookEntry {
+            peer_id: "vela-rio-37".into(),
+            name: "Notebook".into(),
+            policy: Policy::Reconfirm { every_min: 45 },
+            created_at: 7,
+            ask_next: true,
+        };
+        let all = [
+            Data::BookList,
+            Data::BookSetPolicy {
+                peer_id: "vela-rio-37".into(),
+                policy: Policy::StayConnected,
+            },
+            Data::BookRemove {
+                peer_id: "vela-rio-37".into(),
+            },
+            Data::BookReply(Ok(vec![entry])),
+            Data::BookReply(Err("contato x não encontrado".into())),
+        ];
+        for d in all {
+            let json = serde_json::to_string(&d).unwrap();
+            let back: Data = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{d:?}"), "{json}");
+        }
+    }
+
+    #[cfg(feature = "everydesk")]
+    #[test]
+    fn everydesk_book_serve_validates_and_persists() {
+        use crate::everydesk::pairings::{Book, Pairing, Policy};
+        use hbb_common::sodiumoxide::crypto::sign;
+        let dir = std::env::temp_dir().join(format!(
+            "everydesk-ipc-book-{}-{}",
+            std::process::id(),
+            hbb_common::get_time()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pairings.json");
+        let (_, sk) = sign::gen_keypair();
+        let mut b = Book::load_from(&path, &sk.0);
+        for id in ["vela-rio-37", "123456789"] {
+            b.upsert(Pairing {
+                peer_id: id.into(),
+                pk: [0xAA; 32],
+                name: id.into(),
+                avatar: Some(vec![1; 10]),
+                policy: Policy::AskAlways,
+                created_at: 1,
+                ask_next: false,
+            });
+        }
+        b.save().unwrap();
+        let book = std::sync::Mutex::new(b);
+        let ok = |d: Data| match d {
+            Data::BookReply(Ok(v)) => v,
+            other => panic!("expected Ok reply, got {other:?}"),
+        };
+        let err = |d: Data| match d {
+            Data::BookReply(Err(e)) => e,
+            other => panic!("expected Err reply, got {other:?}"),
+        };
+        let set = |id: &str, policy| Data::BookSetPolicy {
+            peer_id: id.into(),
+            policy,
+        };
+
+        let list = ok(everydesk_book::serve(Data::BookList, &book));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].peer_id, "123456789");
+
+        // valid change persists to disk
+        let list = ok(everydesk_book::serve(
+            set("vela-rio-37", Policy::Reconfirm { every_min: 1440 }),
+            &book,
+        ));
+        assert_eq!(list[1].policy, Policy::Reconfirm { every_min: 1440 });
+        let on_disk = Book::load_from(&path, &sk.0);
+        assert_eq!(
+            on_disk.get("vela-rio-37").unwrap().policy,
+            Policy::Reconfirm { every_min: 1440 }
+        );
+        // the pin and avatar are untouched by a policy change
+        assert_eq!(on_disk.get("vela-rio-37").unwrap().pk, [0xAA; 32]);
+
+        // rejected: out-of-range periods, bad ids, unknown ids (no pairing is ever added)
+        for m in [0, 1441, u32::MAX] {
+            err(everydesk_book::serve(
+                set("vela-rio-37", Policy::Reconfirm { every_min: m }),
+                &book,
+            ));
+        }
+        let long = "a".repeat(65);
+        for id in ["", "a b", "x/../y", "id@server", long.as_str()] {
+            err(everydesk_book::serve(set(id, Policy::AskAlways), &book));
+            err(everydesk_book::serve(
+                Data::BookRemove { peer_id: id.into() },
+                &book,
+            ));
+        }
+        assert!(err(everydesk_book::serve(
+            set("novo-id-12", Policy::StayConnected),
+            &book
+        ))
+        .contains("não encontrado"));
+        assert!(book.lock().unwrap().get("novo-id-12").is_none());
+        // a non-book request is refused
+        err(everydesk_book::serve(Data::Close, &book));
+
+        // remove is idempotent and persists
+        let list = ok(everydesk_book::serve(
+            Data::BookRemove {
+                peer_id: "vela-rio-37".into(),
+            },
+            &book,
+        ));
+        assert_eq!(list.len(), 1);
+        ok(everydesk_book::serve(
+            Data::BookRemove {
+                peer_id: "vela-rio-37".into(),
+            },
+            &book,
+        ));
+        assert!(Book::load_from(&path, &sk.0).get("vela-rio-37").is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

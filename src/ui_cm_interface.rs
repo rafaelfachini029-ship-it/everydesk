@@ -472,6 +472,35 @@ pub fn revoke(peer_id: &str) {
             log::error!("pairings: cannot save after revoking {}: {}", peer_id, e);
         }
     }
+    end_revoked_sessions(peer_id);
+}
+
+/// EveryDesk, service mode: the book that decides lives in the SYSTEM `--server`, so forget
+/// `peer_id` there over the main IPC (`Data::BookRemove`). The local copy is dropped too (an
+/// in-process fallback host, after the service stops, must not trust it either) and live
+/// sessions end in any case; `Err` (pt-BR) when the service did not confirm.
+#[cfg(feature = "everydesk")]
+pub fn revoke_on_service(peer_id: &str) -> Result<(), String> {
+    let res = crate::ipc::everydesk_book::request(Data::BookRemove {
+        peer_id: peer_id.to_owned(),
+    })
+    .map(|_| ());
+    let had_local = crate::everydesk::pairings::book()
+        .lock()
+        .unwrap()
+        .get(peer_id)
+        .is_some();
+    if had_local {
+        revoke(peer_id);
+    } else {
+        end_revoked_sessions(peer_id);
+    }
+    res
+}
+
+/// EveryDesk: ends the sessions `peer_id` has open here, telling it it was revoked.
+#[cfg(feature = "everydesk")]
+fn end_revoked_sessions(peer_id: &str) {
     for client in CLIENTS.read().unwrap().values() {
         if client.peer_id == peer_id {
             allow_err!(client.tx.send(Data::Revoke {

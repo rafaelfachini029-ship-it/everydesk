@@ -17,13 +17,21 @@
 //! `{"kind":"Reconfirm","every_min":20}` (the engine `Policy` is externally tagged, which
 //! is awkward in TS).
 //!
+//! Where the host-side book lives (`route`): portable, in this process (`pairings::book`);
+//! service mode (`service::is_service_mode`), in the SYSTEM `--server`, which reads its own
+//! `pairings.json`. There the list, policy changes and revokes go over the main IPC
+//! (`ipc::Data::Book*`, served by `ipc::everydesk_book::serve`, 3 s timeout, pt-BR error); the
+//! local copy is kept in step best-effort (an in-process fallback host reads it). The
+//! controller-side `contacts_book` is always local.
+//!
 //! Only a successful reply changes what the app shows: a failed query (timeout, network,
 //! hbbs' rate limit) keeps the last known state. Queries are at least 6 s apart (hbbs
 //! allows one per 5 s per id); a request inside that window is answered from the last
 //! known state and the refresher is woken to query as soon as the window opens.
 
 use hbb_common::{log, tokio};
-use librustdesk::everydesk::pairings::{book, contacts_book, Book, Pairing, Policy};
+use librustdesk::everydesk::pairings::{book, contacts_book, Book, BookEntry, Policy};
+use librustdesk::ipc::{everydesk_book, Data};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -62,7 +70,8 @@ impl From<Policy> for PolicyView {
 
 /// Allowed reconfirmation periods (minutes): any value from 1 min to 24 h. The UI offers the
 /// presets 20/45/80 plus "Outro…" (spec: "ou livre").
-pub const RECONFIRM_PERIOD_RANGE_MIN: std::ops::RangeInclusive<u32> = 1..=1440;
+pub const RECONFIRM_PERIOD_RANGE_MIN: std::ops::RangeInclusive<u32> =
+    librustdesk::everydesk::pairings::RECONFIRM_RANGE_MIN;
 
 /// Rejects a Reconfirm period outside `RECONFIRM_PERIOD_RANGE_MIN`.
 impl TryFrom<PolicyView> for Policy {
@@ -109,18 +118,67 @@ struct State {
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Wakes the refresher early (a request was debounced).
 static WAKE: OnceLock<Mutex<Sender<()>>> = OnceLock::new();
+/// Service mode: the service's last answered book, shown while it does not answer.
+static LAST_HOST: Mutex<Option<Vec<BookEntry>>> = Mutex::new(None);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// The service's book, over the main IPC.
+    Ipc,
+    /// This process's `pairings::book`.
+    Local,
+}
+
+/// Pure routing seam (same rule as `settings`): service mode -> the service's book over IPC;
+/// portable, or this process still hosting in-process (hand-over window, it owns the `""`
+/// pipe) -> local.
+fn route(service_mode: bool, hosting_in_process: bool) -> Route {
+    if service_mode && !hosting_in_process {
+        Route::Ipc
+    } else {
+        Route::Local
+    }
+}
+
+fn current_route() -> Route {
+    route(
+        crate::service::is_service_mode(),
+        librustdesk::common::is_server_running(),
+    )
+}
+
+fn cache_host(list: &[BookEntry]) {
+    *LAST_HOST.lock().unwrap_or_else(|e| e.into_inner()) = Some(list.to_vec());
+}
 
 // ---- pairing books ---------------------------------------------------------------------
 
-fn entries(book: &std::sync::Mutex<Book>) -> Vec<Pairing> {
-    let book = book.lock().unwrap_or_else(|e| e.into_inner());
-    book.list().into_iter().cloned().collect()
+fn entries(book: &std::sync::Mutex<Book>) -> Vec<BookEntry> {
+    book.lock().unwrap_or_else(|e| e.into_inner()).entries()
+}
+
+/// The book the host decides with: local, or the service's (last answer when it is silent).
+fn host_entries() -> Vec<BookEntry> {
+    match current_route() {
+        Route::Local => entries(book()),
+        Route::Ipc => match everydesk_book::request(Data::BookList) {
+            Ok(list) => {
+                cache_host(&list);
+                list
+            }
+            Err(_) => LAST_HOST
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_default(),
+        },
+    }
 }
 
 /// Host-side pairings (policy editable) and controller-side contacts (policy `None`).
-fn pairings() -> Vec<(Pairing, bool)> {
-    let mut out: Vec<(Pairing, bool)> =
-        entries(book()).into_iter().map(|p| (p, true)).collect();
+fn pairings() -> Vec<(BookEntry, bool)> {
+    let mut out: Vec<(BookEntry, bool)> =
+        host_entries().into_iter().map(|p| (p, true)).collect();
     out.extend(entries(contacts_book()).into_iter().map(|p| (p, false)));
     out
 }
@@ -142,7 +200,7 @@ fn paired_ids() -> Vec<String> {
 
 /// One row per id: a peer in both books shows the host-side entry (its policy is ours).
 /// Input order matters: host-side entries first.
-fn contact_views(list: Vec<(Pairing, bool)>, known: &HashMap<String, bool>) -> Vec<ContactView> {
+fn contact_views(list: Vec<(BookEntry, bool)>, known: &HashMap<String, bool>) -> Vec<ContactView> {
     let mut out: Vec<ContactView> = Vec::new();
     for (p, host_side) in list {
         if out.iter().any(|c| c.peer_id == p.peer_id) {
@@ -176,19 +234,46 @@ pub async fn contacts_list() -> Vec<ContactView> {
     .unwrap_or_default()
 }
 
-#[tauri::command]
-pub fn contacts_set_policy(peer_id: String, policy: PolicyView) -> Result<(), String> {
-    let engine = Policy::try_from(policy)?;
+/// Sets the policy in this process's book (`Err` when `peer_id` is not paired here).
+fn set_policy_local(peer_id: &str, policy: Policy) -> Result<(), String> {
     let mut book = book().lock().unwrap_or_else(|e| e.into_inner());
-    let Some(mut p) = book.get(&peer_id).cloned() else {
+    let Some(mut p) = book.get(peer_id).cloned() else {
         return Err(format!("contato {peer_id} não encontrado"));
     };
-    p.policy = engine;
+    p.policy = policy;
     book.upsert(p);
     book.save().map_err(|e| {
         log::error!("everydesk: cannot save policy for {peer_id}: {e}");
         format!("não foi possível salvar: {e}")
-    })?;
+    })
+}
+
+#[tauri::command]
+pub async fn contacts_set_policy(peer_id: String, policy: PolicyView) -> Result<(), String> {
+    // Off the main thread: in service mode this waits for the service (up to 3 s).
+    tauri::async_runtime::spawn_blocking(move || set_policy(&peer_id, policy))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn set_policy(peer_id: &str, policy: PolicyView) -> Result<(), String> {
+    let engine = Policy::try_from(policy)?;
+    match current_route() {
+        Route::Local => set_policy_local(peer_id, engine)?,
+        Route::Ipc => {
+            let list = everydesk_book::request(Data::BookSetPolicy {
+                peer_id: peer_id.to_owned(),
+                policy: engine,
+            })?;
+            cache_host(&list);
+            // Keep the local copy in step when it has the peer (fallback host).
+            if book().lock().unwrap_or_else(|e| e.into_inner()).get(peer_id).is_some() {
+                if let Err(e) = set_policy_local(peer_id, engine) {
+                    log::warn!("everydesk: local copy of {peer_id}'s policy not updated: {e}");
+                }
+            }
+        }
+    }
     log::info!("everydesk: contact {peer_id} policy -> {policy:?}");
     Ok(())
 }
@@ -197,21 +282,52 @@ pub fn contacts_set_policy(peer_id: String, policy: PolicyView) -> Result<(), St
 /// from the book, saves, and ends a live session of that peer here with a revoke notice);
 /// controller side is only dropped locally (the host keeps its own decision).
 #[tauri::command]
-pub fn contacts_remove(peer_id: String) -> Result<(), String> {
+pub async fn contacts_remove(peer_id: String) -> Result<(), String> {
+    // Off the main thread: in service mode this waits for the service (up to 2 x 3 s).
+    tauri::async_runtime::spawn_blocking(move || remove(&peer_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn remove(peer_id: &str) -> Result<(), String> {
     log::info!("everydesk: contact {peer_id} removed");
-    let host_side = book().lock().unwrap_or_else(|e| e.into_inner()).get(&peer_id).is_some();
-    if host_side {
-        librustdesk::ui_cm_interface::revoke(&peer_id);
-    }
+    let local = book().lock().unwrap_or_else(|e| e.into_inner()).get(peer_id).is_some();
+    let host_result = match current_route() {
+        Route::Local => {
+            if local {
+                librustdesk::ui_cm_interface::revoke(peer_id);
+            }
+            Ok(())
+        }
+        Route::Ipc => {
+            // Fail safe: when the service cannot say whether it has the peer, try the revoke
+            // anyway (it reports the failure and still ends the sessions here).
+            let on_service = everydesk_book::request(Data::BookList)
+                .map_or(true, |list| list.iter().any(|e| e.peer_id == peer_id));
+            if on_service || local {
+                let r = librustdesk::ui_cm_interface::revoke_on_service(peer_id);
+                if r.is_ok() {
+                    if let Some(list) =
+                        LAST_HOST.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+                    {
+                        list.retain(|e| e.peer_id != peer_id);
+                    }
+                }
+                r
+            } else {
+                Ok(())
+            }
+        }
+    };
     let mut contacts = contacts_book().lock().unwrap_or_else(|e| e.into_inner());
-    if contacts.get(&peer_id).is_some() {
-        contacts.remove(&peer_id);
+    if contacts.get(peer_id).is_some() {
+        contacts.remove(peer_id);
         contacts.save().map_err(|e| {
             log::error!("everydesk: cannot save contacts after removing {peer_id}: {e}");
             format!("não foi possível salvar: {e}")
         })?;
     }
-    Ok(())
+    host_result
 }
 
 /// Last known state of `ids`, in list order; an id never answered yet is offline.
@@ -453,16 +569,25 @@ mod tests {
         assert_eq!(serde_json::from_value::<ContactView>(json).unwrap(), only_controlled);
     }
 
-    fn pairing(id: &str, name: &str, policy: Policy) -> Pairing {
-        Pairing {
+    fn pairing(id: &str, name: &str, policy: Policy) -> BookEntry {
+        BookEntry {
             peer_id: id.into(),
-            pk: [7; 32],
             name: name.into(),
-            avatar: None,
             policy,
             created_at: 1,
             ask_next: false,
         }
+    }
+
+    #[test]
+    fn contacts_route_by_mode() {
+        // installed service: the book the host decides with is the service's, over IPC
+        assert_eq!(route(true, false), Route::Ipc);
+        // portable: this process hosts, its own book is the truth
+        assert_eq!(route(false, true), Route::Local);
+        assert_eq!(route(false, false), Route::Local);
+        // hand-over window: we still own the pipe, IPC would only reach ourselves
+        assert_eq!(route(true, true), Route::Local);
     }
 
     #[test]

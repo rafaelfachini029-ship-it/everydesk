@@ -91,7 +91,7 @@ impl Book {
         Self::load_from(&Config::path(FILE_NAME), &sk)
     }
 
-    fn load_from(path: &Path, sk: &[u8]) -> Book {
+    pub(crate) fn load_from(path: &Path, sk: &[u8]) -> Book {
         let mut book = Book {
             pairings: HashMap::new(),
             path: path.to_owned(),
@@ -207,6 +207,77 @@ impl Book {
         let mut list: Vec<&Pairing> = self.pairings.values().collect();
         list.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
         list
+    }
+
+    /// What the app may see of the book over IPC (`ipc::Data::BookReply`): no key, no avatar.
+    pub fn entries(&self) -> Vec<BookEntry> {
+        self.list().into_iter().map(BookEntry::from).collect()
+    }
+
+    /// Changes the policy of an EXISTING pairing (never adds one). Validated: the id's shape and
+    /// a Reconfirm period in `RECONFIRM_RANGE_MIN`. True when the stored policy changed.
+    pub fn set_policy(&mut self, peer_id: &str, policy: Policy) -> Result<bool, String> {
+        check_peer_id(peer_id)?;
+        check_policy(policy)?;
+        let Some(p) = self.pairings.get_mut(peer_id) else {
+            return Err(format!("contato {peer_id} não encontrado"));
+        };
+        if p.policy == policy {
+            return Ok(false);
+        }
+        p.policy = policy;
+        Ok(true)
+    }
+}
+
+/// A pairing as listed over IPC: no pk (the app has no use for it), no avatar (size).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookEntry {
+    pub peer_id: String,
+    pub name: String,
+    pub policy: Policy,
+    pub created_at: i64,
+    /// A deny is pending: the next login shows the accept card whatever the policy.
+    pub ask_next: bool,
+}
+
+impl From<&Pairing> for BookEntry {
+    fn from(p: &Pairing) -> Self {
+        BookEntry {
+            peer_id: p.peer_id.clone(),
+            name: p.name.clone(),
+            policy: p.policy,
+            created_at: p.created_at,
+            ask_next: p.ask_next,
+        }
+    }
+}
+
+/// Allowed reconfirmation periods (minutes): 1 min to 24 h.
+pub const RECONFIRM_RANGE_MIN: std::ops::RangeInclusive<u32> = 1..=1440;
+/// Longest peer id accepted from IPC (memorable codes are <= 16, numeric ids 9-10).
+pub const MAX_PEER_ID_LEN: usize = 64;
+
+/// A peer id as it may arrive over IPC: `[A-Za-z0-9_-]{1,64}`.
+pub fn check_peer_id(peer_id: &str) -> Result<(), String> {
+    let ok = !peer_id.is_empty()
+        && peer_id.len() <= MAX_PEER_ID_LEN
+        && peer_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+    if ok {
+        Ok(())
+    } else {
+        Err("código de contato inválido".to_owned())
+    }
+}
+
+pub fn check_policy(policy: Policy) -> Result<(), String> {
+    match policy {
+        Policy::Reconfirm { every_min } if !RECONFIRM_RANGE_MIN.contains(&every_min) => Err(
+            format!("período de reconfirmação inválido: {every_min} min"),
+        ),
+        _ => Ok(()),
     }
 }
 
